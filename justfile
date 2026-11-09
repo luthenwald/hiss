@@ -29,6 +29,7 @@ dylib := if os() == "macos" { "libhiss.dylib" } else { "libhiss.so" }
 # Installs libhiss and hiss.scm into Steel's home (the old dylib is unlinked first, so a running editor keeps its copy).
 install profile="release":
    cargo build --profile {{profile}}
+   @python3 -I -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1])' "target/{{profile}}/{{dylib}}" 2>/dev/null || (echo "hiss: the built dylib does not load, so it is not installed" && exit 1)
    mkdir -p "{{steel-home}}/native" "{{steel-home}}/cogs/hiss"
    rm -f "{{steel-home}}/native/{{dylib}}"
    cp "target/{{profile}}/{{dylib}}" "{{steel-home}}/native/"
@@ -37,3 +38,4 @@ install profile="release":
 # Opens the Steel fork with hiss loaded, using examples/ as its Steel config.
 hx *args: (install "quick")
    HELIX_STEEL_CONFIG="{{justfile_directory()}}/examples" hxs {{args}}
+

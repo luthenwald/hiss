@@ -17,11 +17,14 @@ serde_json = "1"
 steel-core = { git = "https://github.com/mattwparas/steel.git", rev = "24cd21598c091fb88bc10a6375a1ded25e677c37", features = ["anyhow", "dylibs", "sync", "biased", "imbl"] }
 tokio = { version = "1.52", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
 
-# No panic = "abort": the library runs inside the editor.
+# No panic = "abort": the library runs inside the editor. No strip either,
+# not even the debuginfo strip cargo does by default: on this macOS (Darwin 27)
+# a stripped libhiss fails dlopen with "mis-aligned LINKEDIT string pool", and
+# Steel's loader then panics inside the editor.
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+strip = "none"
 
 [profile.quick]
 inherits = "release"
