@@ -18,7 +18,18 @@ const VERSION: &str = "2023-06-01";
 /// server too.
 const BLANK_LINE: &str = "\n\n";
 
-const SYSTEM: &str = "You are a code completion engine. Output only the exact text to insert at <CURSOR/>. No prose, no code fences, no repetition of text after the cursor.";
+/// The instructions. The rules answer what went wrong in the quality check
+/// (`just quality`): commentary on broken files, and indentation that did not
+/// follow the file.
+const SYSTEM: &str = "\
+You are the inline completion engine of a code editor. The user sends the file they are editing, with <CURSOR/> where the cursor is. You reply with the text to insert at the cursor, and nothing else.
+
+Rules:
+- Reply with code only, exactly as it should appear in the file. Never explain, comment on, or describe the code, and never talk to the user, even when the file looks broken or unfinished: then complete what the author is typing at the cursor and leave the rest alone.
+- Never repeat text that already follows the cursor.
+- Indent with the unit in the file's indent attribute. Each new line of your reply starts at column zero, so write its full indentation.
+- When the cursor ends a line that opens a block, start your reply with a line break, then the block's first line at one level deeper.
+- Stop at the end of the current statement or block. When nothing sensible fits, reply with nothing.";
 
 /// Everything that shapes a request, with the defaults of spec 04/08 and 06/08.
 #[derive(Debug, Clone)]
@@ -237,8 +248,10 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
    let suffix = clean::head_lines(&request.suffix, settings.suffix_chars);
    let path = request.path.replace('"', "&quot;");
    let language = request.language.replace('"', "&quot;");
-   let file =
-      format!("<file path=\"{path}\" lang=\"{language}\">\n{prefix}<CURSOR/>{suffix}\n</file>");
+   let indent = clean::indent_of(prefix).unit;
+   let file = format!(
+      "<file path=\"{path}\" lang=\"{language}\" indent=\"{indent}\">\n{prefix}<CURSOR/>{suffix}\n</file>"
+   );
    json!({
       "model": settings.model,
       "max_tokens": settings.max_tokens,
@@ -272,7 +285,7 @@ mod tests {
       assert_eq!(messages.last().unwrap()["role"], "user");
       assert_eq!(
          messages[0]["content"],
-         "<file path=\"src/&quot;main&quot;.rs\" lang=\"rust\">\nfn main() {\n   let x = <CURSOR/>;\n}\n\n</file>"
+         "<file path=\"src/&quot;main&quot;.rs\" lang=\"rust\" indent=\"3 spaces\">\nfn main() {\n   let x = <CURSOR/>;\n}\n\n</file>"
       );
    }
 
