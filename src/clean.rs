@@ -35,11 +35,21 @@ pub struct Cleaned {
 /// Cleans the reply so far for display (spec 04/08). It runs on the whole
 /// text each time, so it may be called on partial replies.
 pub fn clean(raw: &str, shape: &Shape) -> Cleaned {
+   clean_as(raw, shape, false)
+}
+
+/// Cleans the whole reply once the stream has ended, when its last line is
+/// complete too and may turn out to be a sentence.
+pub fn clean_end(raw: &str, shape: &Shape) -> Cleaned {
+   clean_as(raw, shape, true)
+}
+
+fn clean_as(raw: &str, shape: &Shape, complete: bool) -> Cleaned {
    let text = raw.replace(CURSOR, "");
    let text = strip_fence(&text);
    let cut = shape
       .prose_guard
-      .then(|| quality::prose(text, false))
+      .then(|| quality::prose(text, complete))
       .flatten();
    let text = cut.map_or(text, |at| text[..at].trim_end());
    let text = &text[..text.len() - suffix_overlap(text, shape.suffix)];
@@ -352,6 +362,16 @@ mod tests {
          cleaned.text,
          "let sum: f64 = self.values.iter().sum();\n      Some(sum / self.values.len() as f64)"
       );
+   }
+
+   #[test]
+   fn a_last_sentence_line_goes_when_the_stream_ends() {
+      let shape = Shape::new("fn f() {\n   ", "\n}\n", "rust");
+      let raw = "let a = 1;\nFirst Thing worth saying about this code here.";
+      assert_eq!(super::clean(raw, &shape).text, raw);
+      let end = super::clean_end(raw, &shape);
+      assert_eq!(end.text, "let a = 1;");
+      assert!(end.prose);
    }
 
    #[test]

@@ -239,6 +239,14 @@ impl Client {
             }
          }
       }
+      let cleaned = clean::clean_end(&raw, &shape);
+      if cleaned.text != shown {
+         shown = cleaned.text;
+         on_text(&shown);
+      }
+      if cleaned.prose && timing.stop_reason != "prose" {
+         timing.stop_reason = "prose".into();
+      }
       timing.total = start.elapsed();
       timing.chars = shown.chars().count();
       Ok(timing)
