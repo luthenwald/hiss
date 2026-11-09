@@ -10,6 +10,11 @@
 //! is not ours, so they only wait on channels; the work itself runs on
 //! libhiss's own runtime.
 
+pub mod api;
+pub mod clean;
+mod ffi;
+pub mod sse;
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -19,7 +24,7 @@ use steel::declare_module;
 use steel::steel_vm::ffi::{FFIModule, FFIValue, FfiFuture, FfiFutureExt, RegisterFFIFn};
 
 /// libhiss's own runtime, started on first use.
-static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+pub static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
    tokio::runtime::Builder::new_multi_thread()
       .worker_threads(2)
       .thread_name("hiss")
@@ -39,8 +44,7 @@ fn version() -> Result<String, String> {
 }
 
 /// `(hiss-ping ms)`: a future that resolves to `"pong"` after `ms` milliseconds,
-/// timed on libhiss's runtime. It proves the async path end to end: Steel awaits
-/// it through `helix-await-callback`, and the callback runs on the main thread.
+/// timed on libhiss's runtime. A check that the async path reaches the editor.
 fn ping(ms: usize) -> FFIValue {
    let spawned = guarded("hiss-ping", || {
       let (tx, rx) = tokio::sync::oneshot::channel();
@@ -64,10 +68,16 @@ fn ping(ms: usize) -> FFIValue {
 }
 
 fn create_module() -> FFIModule {
+   ffi::warm_up();
    let mut module = FFIModule::new("hiss/native");
    module
       .register_fn("hiss-version", version)
-      .register_fn("hiss-ping", ping);
+      .register_fn("hiss-ping", ping)
+      .register_fn("hiss-start!", ffi::start)
+      .register_fn("hiss-next", ffi::next)
+      .register_fn("hiss-cancel!", ffi::cancel)
+      .register_fn("hiss-error", ffi::error)
+      .register_fn("hiss-timing", ffi::timing);
    module
 }
 
