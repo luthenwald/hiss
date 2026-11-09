@@ -27,7 +27,7 @@ You are the inline completion engine of a code editor. The user sends the file t
 Rules:
 - Reply with code only, exactly as it should appear in the file. Never explain, comment on, or describe the code, and never talk to the user, even when the file looks broken or unfinished: then complete what the author is typing at the cursor and leave the rest alone.
 - Never repeat text that already follows the cursor.
-- Indent with the unit in the file's indent attribute. Each new line of your reply starts at column zero, so write its full indentation.
+- Indent with the unit in the file's indent attribute, or as the file does when there is none. Each new line of your reply starts at column zero, so write its full indentation.
 - When the cursor ends a line that opens a block, start your reply with a line break, then the block's first line at one level deeper.
 - Stop at the end of the current statement or block. When nothing sensible fits, reply with nothing.";
 
@@ -256,9 +256,12 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
    let suffix = clean::head_lines(&request.suffix, settings.suffix_chars);
    let path = request.path.replace('"', "&quot;");
    let language = request.language.replace('"', "&quot;");
-   let indent = clean::indent_of(prefix).unit;
+   let indent = clean::indent_of(prefix)
+      .unit
+      .map(|unit| format!(" indent=\"{unit}\""))
+      .unwrap_or_default();
    let file = format!(
-      "<file path=\"{path}\" lang=\"{language}\" indent=\"{indent}\">\n{prefix}<CURSOR/>{suffix}\n</file>"
+      "<file path=\"{path}\" lang=\"{language}\"{indent}>\n{prefix}<CURSOR/>{suffix}\n</file>"
    );
    json!({
       "model": settings.model,

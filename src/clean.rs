@@ -47,10 +47,80 @@ pub fn clean(raw: &str, shape: &Shape) -> Cleaned {
       text: if text.trim().is_empty() {
          String::new()
       } else {
-         text.to_string()
+         follow_indent(text, &shape.indent)
       },
       prose: cut.is_some(),
    }
+}
+
+/// How many spaces a tab stands for when a tab file gets spaces.
+const TAB_WIDTH: usize = 4;
+
+/// Brings the reply's indentation in line with the file, on lines that have
+/// content (a line still streaming keeps its whitespace until text arrives):
+/// - at the start of a line, a reply that opens with a line break loses it,
+///   since it would leave the cursor's line empty and start one lower;
+/// - a first line that repeats the indent the cursor already sits after loses
+///   it, since `insert_string` would put it in twice;
+/// - later lines use the file's unit, a tab standing for one unit;
+/// - in a file indented with spaces, when no line fits the file's width but
+///   all fit another (4 in a 3-space file), the depth is rescaled.
+///
+/// When the unit is unknown, only the first rule applies.
+fn follow_indent(text: &str, indent: &Indent) -> String {
+   let text = if indent.at_line_start {
+      text.trim_start_matches('\n')
+   } else {
+      text
+   };
+   let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
+   if indent.at_line_start && !indent.line.is_empty() {
+      if let Some(rest) = lines[0].strip_prefix(indent.line.as_str()) {
+         lines[0] = rest.to_string();
+      }
+   }
+   let Some(unit) = indent.unit else {
+      return lines.join("\n");
+   };
+   let tab = match unit {
+      Unit::Tabs => TAB_WIDTH,
+      Unit::Spaces(n) => n,
+   };
+   let columns = |lead: &str| {
+      lead
+         .chars()
+         .map(|c| if c == '\t' { tab } else { 1 })
+         .sum::<usize>()
+   };
+   let widths: Vec<usize> = lines
+      .iter()
+      .skip(1)
+      .filter(|line| !line.trim().is_empty())
+      .map(|line| columns(leading(line)))
+      .collect();
+   let scale = match unit {
+      Unit::Spaces(n) if widths.iter().any(|w| w % n != 0) => [4, 2, 8]
+         .into_iter()
+         .find(|&m| m != n && widths.iter().all(|w| w % m == 0))
+         .map(|m| (n, m)),
+      _ => None,
+   };
+   for line in lines.iter_mut().skip(1) {
+      if line.trim().is_empty() {
+         continue;
+      }
+      let lead = leading(line);
+      let width = columns(lead);
+      let width = scale.map_or(width, |(n, m)| width / m * n);
+      let new_lead = match unit {
+         Unit::Tabs => "\t".repeat((width + TAB_WIDTH / 2) / TAB_WIDTH),
+         Unit::Spaces(_) => " ".repeat(width),
+      };
+      if new_lead != lead {
+         *line = format!("{new_lead}{}", &line[lead.len()..]);
+      }
+   }
+   lines.join("\n")
 }
 
 /// Drops a code fence the model added anyway. A reply that opens with a fence
@@ -111,7 +181,8 @@ impl std::fmt::Display for Unit {
 /// The indentation around the cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Indent {
-   pub unit: Unit,
+   /// None when the text before the cursor shows no indentation to go by.
+   pub unit: Option<Unit>,
    /// The cursor line's leading whitespace.
    pub line: String,
    /// Only whitespace sits before the cursor on its line.
@@ -122,19 +193,21 @@ fn leading(line: &str) -> &str {
    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
-/// Reads the indentation from the text before the cursor. Tabs win when more
-/// lines start with a tab than with a space; otherwise the unit is the most
-/// common step between neighbouring lines (the smaller one on a tie), or four
-/// spaces when nothing is indented.
+/// Reads the indentation from the text before the cursor, the cursor's own
+/// line included. Tabs win when more lines start with a tab than with a
+/// space; otherwise the unit is the most common step between neighbouring
+/// lines (the smaller one on a tie), or unknown when nothing steps in.
 pub fn indent_of(prefix: &str) -> Indent {
+   let last = prefix.rsplit('\n').next().unwrap_or("");
    let lines: Vec<&str> = prefix
       .split('\n')
       .filter(|l| !l.trim().is_empty())
+      .chain((last.trim().is_empty() && !last.is_empty()).then_some(last))
       .collect();
    let tabs = lines.iter().filter(|l| l.starts_with('\t')).count();
    let spaces = lines.iter().filter(|l| l.starts_with(' ')).count();
    let unit = if tabs > spaces {
-      Unit::Tabs
+      Some(Unit::Tabs)
    } else {
       let widths: Vec<usize> = lines
          .iter()
@@ -153,9 +226,8 @@ pub fn indent_of(prefix: &str) -> Indent {
          .rev()
          .max_by_key(|&n| steps[n])
          .filter(|&n| steps[n] > 0)
-         .map_or(Unit::Spaces(4), Unit::Spaces)
+         .map(Unit::Spaces)
    };
-   let last = prefix.rsplit('\n').next().unwrap_or("");
    Indent {
       unit,
       line: leading(last).to_string(),
@@ -207,6 +279,68 @@ mod tests {
    }
 
    const USER_REPLY: &str = "let sum: f64 = self.values.iter().sum();\n      Some(sum / self.values.len() as f64)} else if false {}The mean method is broken around the cursor: the `if` block is closed before the `let sum` line.";
+
+   fn follow(text: &str, unit: Unit, line: &str) -> String {
+      let indent = Indent {
+         unit: Some(unit),
+         line: line.into(),
+         at_line_start: line.trim().is_empty(),
+      };
+      follow_indent(text, &indent)
+   }
+
+   #[test]
+   fn a_repeated_first_indent_is_dropped() {
+      assert_eq!(
+         follow("      let a = 1;", Unit::Spaces(3), "      "),
+         "let a = 1;"
+      );
+      assert_eq!(
+         follow("   let a = 1;", Unit::Spaces(3), "      "),
+         "   let a = 1;"
+      );
+   }
+
+   #[test]
+   fn a_leading_line_break_at_a_line_start_is_dropped() {
+      assert_eq!(
+         follow("\n      let a = 1;\n      a", Unit::Spaces(3), "      "),
+         "let a = 1;\n      a"
+      );
+      assert_eq!(follow("\n   a", Unit::Spaces(3), "x {"), "\n   a");
+   }
+
+   #[test]
+   fn later_lines_take_the_files_unit() {
+      assert_eq!(
+         follow("a\n\tb\n\t\tc", Unit::Spaces(3), "x"),
+         "a\n   b\n      c"
+      );
+      assert_eq!(
+         follow("a\n    b\n        c", Unit::Tabs, "x"),
+         "a\n\tb\n\t\tc"
+      );
+      assert_eq!(follow("a\n\tb", Unit::Tabs, "x"), "a\n\tb");
+   }
+
+   #[test]
+   fn depth_is_rescaled_only_when_nothing_fits() {
+      assert_eq!(
+         follow("a\n    b\n        c", Unit::Spaces(3), "x"),
+         "a\n   b\n      c"
+      );
+      assert_eq!(
+         follow("a\n      b\n   c", Unit::Spaces(3), "x"),
+         "a\n      b\n   c"
+      );
+      assert_eq!(follow("a\n    b", Unit::Spaces(2), "x"), "a\n    b");
+      assert_eq!(follow("a\n       b", Unit::Spaces(3), "x"), "a\n       b");
+   }
+
+   #[test]
+   fn a_line_still_streaming_keeps_its_whitespace() {
+      assert_eq!(follow("a\n  ", Unit::Tabs, "x"), "a\n  ");
+   }
 
    #[test]
    fn the_users_reply_loses_its_prose_and_the_suffix_echo() {
@@ -295,17 +429,18 @@ mod tests {
    #[test]
    fn indent_is_read_from_the_prefix() {
       let three = indent_of("fn f() {\n   if x {\n      y\n   }\n   ");
-      assert_eq!(three.unit, Unit::Spaces(3));
+      assert_eq!(three.unit, Some(Unit::Spaces(3)));
       assert_eq!(three.line, "   ");
       assert!(three.at_line_start);
       let tabs = indent_of("func f() {\n\tif x {\n\t\ty\n\t}\n\tz := ");
-      assert_eq!(tabs.unit, Unit::Tabs);
+      assert_eq!(tabs.unit, Some(Unit::Tabs));
       assert_eq!(tabs.line, "\t");
       assert!(!tabs.at_line_start);
       let two = indent_of("a {\n  b {\n    c\n  }\n\n  d {\n    ");
-      assert_eq!(two.unit, Unit::Spaces(2));
+      assert_eq!(two.unit, Some(Unit::Spaces(2)));
       assert_eq!(two.line, "    ");
-      assert_eq!(indent_of("a\nb\n").unit, Unit::Spaces(4));
+      assert_eq!(indent_of("a\nb\n").unit, None);
+      assert_eq!(indent_of("fn f() {\n   ").unit, Some(Unit::Spaces(3)));
       assert_eq!(indent_of("").line, "");
    }
 

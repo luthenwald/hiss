@@ -134,13 +134,16 @@ pub fn prose(text: &str, complete: bool) -> Option<usize> {
 pub fn indent_problem(text: &str, indent: &Indent) -> Option<&'static str> {
    let mut lines = text.split('\n');
    let first = lines.next().unwrap_or("");
+   if indent.at_line_start && text.starts_with('\n') {
+      return Some("starts a line lower");
+   }
    if indent.at_line_start && !indent.line.is_empty() && first.starts_with([' ', '\t']) {
       return Some("doubled indent");
    }
    lines
       .filter(|line| !line.trim().is_empty())
       .map(|line| &line[..line.len() - line.trim_start_matches([' ', '\t']).len()])
-      .find_map(|lead| match indent.unit {
+      .find_map(|lead| match indent.unit? {
          Unit::Tabs if lead.contains(' ') => Some("spaces in a tab file"),
          Unit::Spaces(_) if lead.contains('\t') => Some("tabs in a space file"),
          Unit::Spaces(n) if lead.len() % n != 0 => Some("off the unit"),
@@ -229,7 +232,7 @@ mod tests {
 
    fn indent(unit: Unit, line: &str, at_line_start: bool) -> Indent {
       Indent {
-         unit,
+         unit: Some(unit),
          line: line.into(),
          at_line_start,
       }
@@ -242,6 +245,10 @@ mod tests {
       assert_eq!(
          indent_problem("   let a = 1;", &three),
          Some("doubled indent")
+      );
+      assert_eq!(
+         indent_problem("\n      let a = 1;", &three),
+         Some("starts a line lower")
       );
       assert_eq!(
          indent_problem("let a = 1;\n    a", &three),
