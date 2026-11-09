@@ -4,8 +4,8 @@
 (require "helix/keymaps.scm")
 (require "hiss/hiss.scm")
 
-;; For comparing the two ways of drawing the ghost: C-space asks for a
-;; suggestion at the cursor; :hiss-draw hint or :hiss-draw overlay switches.
+;; For now hiss asks only when told to: C-space asks for a suggestion at the
+;; cursor. Asking as you type comes with the next step.
 (add-global-keybinding
    (hash "insert"
       (hash "C-space" ":hiss-try")))
