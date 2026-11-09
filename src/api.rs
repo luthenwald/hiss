@@ -63,7 +63,7 @@ pub struct Request {
 pub struct Timing {
    /// Until the response headers arrived.
    pub headers: Duration,
-   /// Until the first piece of text arrived, if any did.
+   /// Until the first text was shown (after cleaning), if any was.
    pub first_text: Option<Duration>,
    pub total: Duration,
    pub input_tokens: u64,
@@ -71,6 +71,8 @@ pub struct Timing {
    pub output_tokens: u64,
    pub stop_reason: String,
    pub chars: usize,
+   /// The first reply was cut down to nothing as prose, and hiss asked again.
+   pub retried: bool,
 }
 
 impl fmt::Display for Timing {
@@ -94,7 +96,11 @@ impl fmt::Display for Timing {
          } else {
             &self.stop_reason
          },
-      )
+      )?;
+      if self.retried {
+         write!(f, ", retried")?;
+      }
+      Ok(())
    }
 }
 
@@ -157,7 +163,10 @@ impl Client {
    }
 
    /// Streams a completion. `on_text` gets the whole cleaned text each time
-   /// it changes. Returns the timing, or an error for the status line.
+   /// it changes. When the reply is only prose, which the cleaning cuts to
+   /// nothing, it asks once more at once, with the model's prose as its
+   /// earlier turn and a note that only code is wanted. Returns the timing,
+   /// or an error for the status line.
    pub async fn complete(
       &self,
       request: &Request,
@@ -170,8 +179,32 @@ impl Client {
          &request.language,
       );
       shape.prose_guard &= settings.prose_guard;
-      let body = body(request, settings);
+      let first = body(request, settings);
       let start = Instant::now();
+      let mut timing = Timing::default();
+      let reply = self
+         .attempt(&first, &shape, start, &mut timing, &mut on_text)
+         .await?;
+      if reply.prose && reply.shown.is_empty() && !reply.raw.trim().is_empty() {
+         timing.retried = true;
+         let again = retry_body(&first, reply.raw.trim_end());
+         self
+            .attempt(&again, &shape, start, &mut timing, &mut on_text)
+            .await?;
+      }
+      timing.total = start.elapsed();
+      Ok(timing)
+   }
+
+   /// One request and its stream. Adds what it costs to `timing`.
+   async fn attempt(
+      &self,
+      body: &Value,
+      shape: &clean::Shape<'_>,
+      start: Instant,
+      timing: &mut Timing,
+      on_text: &mut impl FnMut(&str),
+   ) -> Result<Reply, String> {
       let mut response = self
          .post(MESSAGES)
          .header("content-type", "application/json")
@@ -179,10 +212,9 @@ impl Client {
          .send()
          .await
          .map_err(|e| format!("hiss: {e}"))?;
-      let mut timing = Timing {
-         headers: start.elapsed(),
-         ..Timing::default()
-      };
+      if timing.headers.is_zero() {
+         timing.headers = start.elapsed();
+      }
       let status = response.status();
       if !status.is_success() {
          let text = response.text().await.unwrap_or_default();
@@ -198,22 +230,29 @@ impl Client {
       let mut decoder = sse::Decoder::default();
       let mut raw = String::new();
       let mut shown = String::new();
+      let mut prose = false;
+      let mut show = |text: String, timing: &mut Timing, shown: &mut String| {
+         if text != *shown {
+            if !text.is_empty() {
+               timing.first_text.get_or_insert_with(|| start.elapsed());
+            }
+            *shown = text;
+            on_text(shown);
+         }
+      };
       'stream: while let Some(chunk) = response.chunk().await.map_err(|e| format!("hiss: {e}"))? {
          for event in parser.push(&chunk) {
             match decoder.decode(&event) {
                Some(Message::Text(piece)) => {
-                  timing.first_text.get_or_insert_with(|| start.elapsed());
                   raw.push_str(&piece);
                   let blank_line = raw.find(BLANK_LINE);
                   if let Some(at) = blank_line {
                      raw.truncate(at);
                   }
-                  let cleaned = clean::clean(&raw, &shape);
-                  if cleaned.text != shown {
-                     shown = cleaned.text;
-                     on_text(&shown);
-                  }
+                  let cleaned = clean::clean(&raw, shape);
+                  show(cleaned.text, timing, &mut shown);
                   if cleaned.prose {
+                     prose = true;
                      timing.stop_reason = "prose".into();
                      break 'stream;
                   }
@@ -223,15 +262,15 @@ impl Client {
                   }
                }
                Some(Message::InputTokens { input, cache_read }) => {
-                  timing.input_tokens = input;
-                  timing.cache_read_tokens = cache_read;
+                  timing.input_tokens += input;
+                  timing.cache_read_tokens += cache_read;
                }
                Some(Message::Stop {
                   reason,
                   output_tokens,
                }) => {
                   timing.stop_reason = reason;
-                  timing.output_tokens = output_tokens;
+                  timing.output_tokens += output_tokens;
                }
                Some(Message::Error(text)) => return Err(format!("hiss: api error: {text}")),
                Some(Message::End) => break 'stream,
@@ -239,18 +278,39 @@ impl Client {
             }
          }
       }
-      let cleaned = clean::clean_end(&raw, &shape);
-      if cleaned.text != shown {
-         shown = cleaned.text;
-         on_text(&shown);
-      }
-      if cleaned.prose && timing.stop_reason != "prose" {
+      let cleaned = clean::clean_end(&raw, shape);
+      show(cleaned.text, timing, &mut shown);
+      if cleaned.prose {
+         prose = true;
          timing.stop_reason = "prose".into();
       }
-      timing.total = start.elapsed();
       timing.chars = shown.chars().count();
-      Ok(timing)
+      Ok(Reply { raw, shown, prose })
    }
+}
+
+/// What one attempt left behind.
+struct Reply {
+   /// The model's text, up to where the stream was stopped.
+   raw: String,
+   shown: String,
+   prose: bool,
+}
+
+/// What the second request adds after a reply that was only prose.
+/// It does not offer "nothing" as an answer: the model then wrote
+/// "(nothing)".
+const RETRY: &str =
+   "That was a comment, not code. Reply with only the code to insert at <CURSOR/>.";
+
+/// The first request, with the model's prose as its turn and the note.
+fn retry_body(first: &Value, prose: &str) -> Value {
+   let mut body = first.clone();
+   if let Some(messages) = body["messages"].as_array_mut() {
+      messages.push(json!({ "role": "assistant", "content": prose }));
+      messages.push(json!({ "role": "user", "content": RETRY }));
+   }
+   body
 }
 
 /// The request body of spec 04/08. No sampling parameters and no prefill:

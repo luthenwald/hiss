@@ -100,6 +100,7 @@ struct Tally {
    indent: usize,
    empty: usize,
    cut: usize,
+   retried: usize,
    ttfts: Vec<Duration>,
 }
 
@@ -149,6 +150,9 @@ fn main() -> Result<(), String> {
             if timing.stop_reason == "prose" {
                tally.cut += 1;
             }
+            if timing.retried {
+               tally.retried += 1;
+            }
             let problem = if last.trim().is_empty() {
                tally.empty += 1;
                None
@@ -185,31 +189,33 @@ fn main() -> Result<(), String> {
       }
       if options.check {
          println!(
-            "\n{:<12} {:>7} {:>6} {:>7} {:>6} {:>4} {:>9}",
-            "fixture", "clean", "prose", "indent", "empty", "cut", "ttft"
+            "\n{:<14} {:>7} {:>6} {:>7} {:>6} {:>4} {:>6} {:>9}",
+            "fixture", "clean", "prose", "indent", "empty", "cut", "retry", "ttft"
          );
          for t in &tallies {
             println!(
-               "{:<12} {:>7} {:>6} {:>7} {:>6} {:>4} {:>9}",
+               "{:<14} {:>7} {:>6} {:>7} {:>6} {:>4} {:>6} {:>9}",
                t.name,
                format!("{}/{}", t.clean, t.runs),
                t.prose,
                t.indent,
                t.empty,
                t.cut,
+               t.retried,
                ms(median(t.ttfts.clone()))
             );
          }
          let sum = |f: fn(&Tally) -> usize| tallies.iter().map(f).sum::<usize>();
          let ttfts = tallies.iter().flat_map(|t| t.ttfts.clone()).collect();
          println!(
-            "{:<12} {:>7} {:>6} {:>7} {:>6} {:>4} {:>9}",
+            "{:<14} {:>7} {:>6} {:>7} {:>6} {:>4} {:>6} {:>9}",
             "all",
             format!("{}/{}", sum(|t| t.clean), sum(|t| t.runs)),
             sum(|t| t.prose),
             sum(|t| t.indent),
             sum(|t| t.empty),
             sum(|t| t.cut),
+            sum(|t| t.retried),
             ms(median(ttfts))
          );
       }
