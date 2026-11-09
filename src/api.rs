@@ -168,7 +168,11 @@ impl Client {
       settings: &Settings,
       mut on_text: impl FnMut(&str),
    ) -> Result<Timing, String> {
-      let suffix = clean::head_lines(&request.suffix, settings.suffix_chars);
+      let shape = clean::Shape::new(
+         clean::tail_lines(&request.prefix, settings.prefix_chars),
+         clean::head_lines(&request.suffix, settings.suffix_chars),
+         &request.language,
+      );
       let body = body(request, settings);
       let start = Instant::now();
       let mut response = self
@@ -207,10 +211,14 @@ impl Client {
                   if let Some(at) = blank_line {
                      raw.truncate(at);
                   }
-                  let cleaned = clean::clean(&raw, suffix);
-                  if cleaned != shown {
-                     shown = cleaned;
+                  let cleaned = clean::clean(&raw, &shape);
+                  if cleaned.text != shown {
+                     shown = cleaned.text;
                      on_text(&shown);
+                  }
+                  if cleaned.prose {
+                     timing.stop_reason = "prose".into();
+                     break 'stream;
                   }
                   if blank_line.is_some() {
                      timing.stop_reason = "blank line".into();

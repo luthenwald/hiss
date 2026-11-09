@@ -76,6 +76,21 @@ fn in_docstring(before: &str) -> bool {
    (before.matches("\"\"\"").count() + before.matches("\'\'\'").count()) % 2 == 1
 }
 
+/// Languages written in prose, where a sentence is the content.
+const PROSE_LANGUAGES: [&str; 6] = ["", "text", "markdown", "plaintext", "git-commit", "mail"];
+
+/// Whether the prose guard applies at this cursor: not in a prose file, a
+/// comment, a string or a docstring, judged from the text before the cursor.
+pub fn prose_applies(prefix: &str, language: &str) -> bool {
+   let line = prefix.rsplit('\n').next().unwrap_or("").trim_start();
+   !PROSE_LANGUAGES.contains(&language)
+      && !QUOTED[..6].iter().any(|q| line.starts_with(q))
+      && !line.contains("//")
+      && line.matches('"').count() % 2 == 0
+      && line.matches('`').count() % 2 == 0
+      && !in_docstring(prefix)
+}
+
 /// Where prose starts in `text`, as a byte offset, if it does:
 /// - a sentence glued to closing code (`}The mean ...`);
 /// - a line that opens like a sentence (`The cursor sits ...`), which counts

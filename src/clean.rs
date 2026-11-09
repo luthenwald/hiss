@@ -1,18 +1,55 @@
 //! Shaping text on the way in (context cuts) and on the way out (cleaning).
 
+use crate::quality;
+
 const CURSOR: &str = "<CURSOR/>";
 const FENCE: &str = "```";
 
+/// What the cleaning needs to know about a request, worked out once.
+#[derive(Debug, Clone)]
+pub struct Shape<'a> {
+   pub suffix: &'a str,
+   pub indent: Indent,
+   /// Whether prose is cut: not in prose files, comments or strings.
+   pub prose_guard: bool,
+}
+
+impl<'a> Shape<'a> {
+   pub fn new(prefix: &str, suffix: &'a str, language: &str) -> Shape<'a> {
+      Shape {
+         suffix,
+         indent: indent_of(prefix),
+         prose_guard: quality::prose_applies(prefix, language),
+      }
+   }
+}
+
+/// The reply as it may be shown, and whether prose was cut from it, which
+/// ends the stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cleaned {
+   pub text: String,
+   pub prose: bool,
+}
+
 /// Cleans the reply so far for display (spec 04/08). It runs on the whole
 /// text each time, so it may be called on partial replies.
-pub fn clean(raw: &str, suffix: &str) -> String {
+pub fn clean(raw: &str, shape: &Shape) -> Cleaned {
    let text = raw.replace(CURSOR, "");
    let text = strip_fence(&text);
-   let text = &text[..text.len() - suffix_overlap(text, suffix)];
-   if text.trim().is_empty() {
-      String::new()
-   } else {
-      text.to_string()
+   let cut = shape
+      .prose_guard
+      .then(|| quality::prose(text, false))
+      .flatten();
+   let text = cut.map_or(text, |at| text[..at].trim_end());
+   let text = &text[..text.len() - suffix_overlap(text, shape.suffix)];
+   Cleaned {
+      text: if text.trim().is_empty() {
+         String::new()
+      } else {
+         text.to_string()
+      },
+      prose: cut.is_some(),
    }
 }
 
@@ -163,6 +200,47 @@ pub fn head_lines(suffix: &str, max_chars: usize) -> &str {
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   /// Cleans with the prose guard off and no indentation to follow.
+   fn clean(raw: &str, suffix: &str) -> String {
+      super::clean(raw, &Shape::new("", suffix, "text")).text
+   }
+
+   const USER_REPLY: &str = "let sum: f64 = self.values.iter().sum();\n      Some(sum / self.values.len() as f64)} else if false {}The mean method is broken around the cursor: the `if` block is closed before the `let sum` line.";
+
+   #[test]
+   fn the_users_reply_loses_its_prose_and_the_suffix_echo() {
+      let prefix = "   fn mean(&self) -> Option<f64> {\n      ";
+      let shape = Shape::new(prefix, "} else if false {}\n   }\n", "rust");
+      let cleaned = super::clean(USER_REPLY, &shape);
+      assert!(cleaned.prose);
+      assert_eq!(
+         cleaned.text,
+         "let sum: f64 = self.values.iter().sum();\n      Some(sum / self.values.len() as f64)"
+      );
+   }
+
+   #[test]
+   fn a_reply_that_explains_itself_shows_nothing() {
+      let shape = Shape::new("fn f() {\n   x\n", "}\n", "rust");
+      let cleaned = super::clean("The cursor sits after the call, so", &shape);
+      assert_eq!(cleaned.text, "");
+      assert!(cleaned.prose);
+   }
+
+   #[test]
+   fn prose_is_kept_where_prose_belongs() {
+      let reply = "The cursor sits here.";
+      for (prefix, language) in [
+         ("# Notes\n", "markdown"),
+         ("fn f() {\n   // ", "rust"),
+         ("let s = \"", "rust"),
+         ("def f():\n    \"\"\"", "python"),
+      ] {
+         let cleaned = super::clean(reply, &Shape::new(prefix, "", language));
+         assert_eq!(cleaned.text, reply, "{language}: {prefix}");
+      }
+   }
 
    #[test]
    fn plain_reply_is_kept() {
