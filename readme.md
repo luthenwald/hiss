@@ -16,4 +16,16 @@ inherits = "base16_terminal"
 
 Then set `theme = "base16_terminal_hiss"` in `config.toml`.
 
-hiss is not ready for use yet: for now it suggests only when you press `C-space`.
+To load it, add this to `~/.config/helix/init.scm`:
+
+```scheme
+(require "helix/keymaps.scm")
+(require "hiss/hiss.scm")
+
+(add-global-keybinding
+   (hash "insert"
+      (hash "tab" ":hiss-accept"
+            "C-space" ":hiss-try")))
+```
+
+hiss starts on. `:hiss-toggle`, `:hiss-on` and `:hiss-off` switch it, and `:hiss-clear` removes the suggestion. When you type what the suggestion shows, it shortens as you go. hiss waits 150 ms after your last edit before it asks; `(hiss-configure #:debounce 250)` in `init.scm` changes that.

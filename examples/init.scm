@@ -4,8 +4,12 @@
 (require "helix/keymaps.scm")
 (require "hiss/hiss.scm")
 
-;; For now hiss asks only when told to: C-space asks for a suggestion at the
-;; cursor. Asking as you type comes with the next step.
+;; hiss starts on; :hiss-toggle, :hiss-on and :hiss-off switch it.
+;; (hiss-configure #:debounce 150)
+
+;; Tab takes the ghost, and indents as usual when there is none.
+;; C-space asks right away and shows how long the answer took.
 (add-global-keybinding
    (hash "insert"
-      (hash "C-space" ":hiss-try")))
+      (hash "tab" ":hiss-accept"
+            "C-space" ":hiss-try")))
