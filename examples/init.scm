@@ -1,11 +1,11 @@
 ;; How a user loads hiss, in ~/.config/helix/init.scm.
 ;; `just hx` runs the fork with this directory as its Steel config.
 
+(require "helix/keymaps.scm")
 (require "hiss/hiss.scm")
 
-;; Keys, once :hiss-accept and :hiss-clear exist (roadmap step 04):
-;;
-;; (add-global-keybinding
-;;    (hash "insert"
-;;       (hash "tab" ":hiss-accept"
-;;             "C-g" ":hiss-clear")))
+;; For comparing the two ways of drawing the ghost: C-space asks for a
+;; suggestion at the cursor; :hiss-draw hint or :hiss-draw overlay switches.
+(add-global-keybinding
+   (hash "insert"
+      (hash "C-space" ":hiss-try")))
