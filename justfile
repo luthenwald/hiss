@@ -39,3 +39,6 @@ install profile="release":
 hx *args: (install "quick")
    HELIX_STEEL_CONFIG="{{justfile_directory()}}/examples" hxs {{args}}
 
+# Completes a fixture through the API without Helix and prints the timings.
+bench fixture="tests/fixtures/mean.rs" runs="5":
+   cargo run --quiet --profile quick --bin complete -- {{fixture}} {{runs}}
