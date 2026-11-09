@@ -1,10 +1,11 @@
 ;; How a user loads hiss, in ~/.config/helix/init.scm.
-;; A proposal (spec 07/08): the require path and the settings function
-;; are settled in roadmap steps 01 and 06.
+;; `just hx` runs the fork with this directory as its Steel config.
 
 (require "hiss/hiss.scm")
 
-(add-global-keybinding
-   (hash "insert"
-      (hash "tab" ":hiss-accept"
-            "C-g" ":hiss-clear")))
+;; Keys, once :hiss-accept and :hiss-clear exist (roadmap step 04):
+;;
+;; (add-global-keybinding
+;;    (hash "insert"
+;;       (hash "tab" ":hiss-accept"
+;;             "C-g" ":hiss-clear")))
