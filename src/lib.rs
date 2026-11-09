@@ -17,11 +17,9 @@ pub mod sse;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::LazyLock;
-use std::time::Duration;
 
-use abi_stable::std_types::{RBoxError, RResult};
 use steel::declare_module;
-use steel::steel_vm::ffi::{FFIModule, FFIValue, FfiFuture, FfiFutureExt, RegisterFFIFn};
+use steel::steel_vm::ffi::{FFIModule, RegisterFFIFn};
 
 /// libhiss's own runtime, started on first use.
 pub static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -43,36 +41,11 @@ fn version() -> Result<String, String> {
    guarded("hiss-version", || env!("CARGO_PKG_VERSION").to_string())
 }
 
-/// `(hiss-ping ms)`: a future that resolves to `"pong"` after `ms` milliseconds,
-/// timed on libhiss's runtime. A check that the async path reaches the editor.
-fn ping(ms: usize) -> FFIValue {
-   let spawned = guarded("hiss-ping", || {
-      let (tx, rx) = tokio::sync::oneshot::channel();
-      RUNTIME.spawn(async move {
-         tokio::time::sleep(Duration::from_millis(ms as u64)).await;
-         let _ = tx.send(());
-      });
-      rx
-   });
-   let future: FfiFuture<RResult<FFIValue, RBoxError>> = async move {
-      match spawned {
-         Ok(rx) => match rx.await {
-            Ok(()) => RResult::ROk(FFIValue::StringV("pong".into())),
-            Err(_) => RResult::ROk(FFIValue::BoolV(false)),
-         },
-         Err(message) => RResult::RErr(RBoxError::from_box(message.into())),
-      }
-   }
-   .into_ffi();
-   future.into()
-}
-
 fn create_module() -> FFIModule {
    ffi::warm_up();
    let mut module = FFIModule::new("hiss/native");
    module
       .register_fn("hiss-version", version)
-      .register_fn("hiss-ping", ping)
       .register_fn("hiss-start!", ffi::start)
       .register_fn("hiss-next", ffi::next)
       .register_fn("hiss-cancel!", ffi::cancel)
