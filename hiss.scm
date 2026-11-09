@@ -99,9 +99,16 @@
 (define overlay-name "hiss-ghost")
 (define overlay-pushed #f)
 
+;; Helix moves inlay hints along with edits, so by the time a hook clears the
+;; ghost, an edit at the cursor (Enter, a typed char, backspace) has carried
+;; the hint to the new cursor position. Removing it only where it was drawn
+;; would leave it on screen for good, so it is removed there and at the cursor.
 (define (ghost-hide!)
    (when (and ghost-text (eq? ghost-style 'hint))
-      (adapter.remove-hint! ghost-index ghost-text))
+      (adapter.remove-hint! ghost-index ghost-text)
+      (let ([cursor (adapter.cursor)])
+         (unless (= cursor ghost-index)
+            (adapter.remove-hint! cursor ghost-text))))
    (set! ghost-text #f))
 
 (define (ghost-show! index text)
