@@ -13,6 +13,7 @@
 pub mod api;
 pub mod clean;
 mod ffi;
+pub mod quality;
 pub mod sse;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};

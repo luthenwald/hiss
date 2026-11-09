@@ -54,6 +54,78 @@ fn suffix_overlap(text: &str, suffix: &str) -> usize {
       .unwrap_or(0)
 }
 
+/// How the file indents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+   Tabs,
+   Spaces(usize),
+}
+
+impl std::fmt::Display for Unit {
+   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      match self {
+         Unit::Tabs => write!(f, "tabs"),
+         Unit::Spaces(1) => write!(f, "1 space"),
+         Unit::Spaces(n) => write!(f, "{n} spaces"),
+      }
+   }
+}
+
+/// The indentation around the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Indent {
+   pub unit: Unit,
+   /// The cursor line's leading whitespace.
+   pub line: String,
+   /// Only whitespace sits before the cursor on its line.
+   pub at_line_start: bool,
+}
+
+fn leading(line: &str) -> &str {
+   &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+}
+
+/// Reads the indentation from the text before the cursor. Tabs win when more
+/// lines start with a tab than with a space; otherwise the unit is the most
+/// common step between neighbouring lines (the smaller one on a tie), or four
+/// spaces when nothing is indented.
+pub fn indent_of(prefix: &str) -> Indent {
+   let lines: Vec<&str> = prefix
+      .split('\n')
+      .filter(|l| !l.trim().is_empty())
+      .collect();
+   let tabs = lines.iter().filter(|l| l.starts_with('\t')).count();
+   let spaces = lines.iter().filter(|l| l.starts_with(' ')).count();
+   let unit = if tabs > spaces {
+      Unit::Tabs
+   } else {
+      let widths: Vec<usize> = lines
+         .iter()
+         .map(|l| leading(l))
+         .filter(|w| !w.contains('\t'))
+         .map(str::len)
+         .collect();
+      let mut steps = [0usize; 9];
+      for pair in widths.windows(2) {
+         let step = pair[1].saturating_sub(pair[0]);
+         if (1..=8).contains(&step) {
+            steps[step] += 1;
+         }
+      }
+      (1..=8)
+         .rev()
+         .max_by_key(|&n| steps[n])
+         .filter(|&n| steps[n] > 0)
+         .map_or(Unit::Spaces(4), Unit::Spaces)
+   };
+   let last = prefix.rsplit('\n').next().unwrap_or("");
+   Indent {
+      unit,
+      line: leading(last).to_string(),
+      at_line_start: last.trim().is_empty(),
+   }
+}
+
 /// The end of `prefix`, at most `max_chars` long, starting at a line start
 /// unless the whole prefix fits.
 pub fn tail_lines(prefix: &str, max_chars: usize) -> &str {
@@ -140,6 +212,23 @@ mod tests {
    #[test]
    fn reply_equal_to_suffix_start_vanishes() {
       assert_eq!(clean(")", ")"), "");
+   }
+
+   #[test]
+   fn indent_is_read_from_the_prefix() {
+      let three = indent_of("fn f() {\n   if x {\n      y\n   }\n   ");
+      assert_eq!(three.unit, Unit::Spaces(3));
+      assert_eq!(three.line, "   ");
+      assert!(three.at_line_start);
+      let tabs = indent_of("func f() {\n\tif x {\n\t\ty\n\t}\n\tz := ");
+      assert_eq!(tabs.unit, Unit::Tabs);
+      assert_eq!(tabs.line, "\t");
+      assert!(!tabs.at_line_start);
+      let two = indent_of("a {\n  b {\n    c\n  }\n\n  d {\n    ");
+      assert_eq!(two.unit, Unit::Spaces(2));
+      assert_eq!(two.line, "    ");
+      assert_eq!(indent_of("a\nb\n").unit, Unit::Spaces(4));
+      assert_eq!(indent_of("").line, "");
    }
 
    #[test]

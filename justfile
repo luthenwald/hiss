@@ -41,4 +41,8 @@ hx *args: (install "quick")
 
 # Completes a fixture through the API without Helix and prints the timings.
 bench fixture="tests/fixtures/mean.rs" runs="5":
-   cargo run --quiet --profile quick --bin complete -- {{fixture}} {{runs}}
+   cargo run --quiet --profile quick --bin complete -- --runs {{runs}} {{fixture}}
+
+# Judges replies for every fixture (prose, indentation) and prints the clean counts.
+quality runs="5" *args:
+   cargo run --quiet --profile quick --bin complete -- --check --runs {{runs}} {{args}} tests/fixtures/*
