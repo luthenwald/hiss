@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use hiss::RUNTIME;
 use hiss::api::{Client, Request, Settings, Timing};
-use hiss::clean::indent_of;
+use hiss::clean::Shape;
 use hiss::quality::{indent_problem, prose};
 
 const CURSOR: &str = "<|>";
@@ -121,7 +121,7 @@ fn main() -> Result<(), String> {
       let mut tallies = Vec::new();
       for path in &options.fixtures {
          let request = request(path)?;
-         let indent = indent_of(&request.prefix);
+         let indent = Shape::new(&request.prefix, &request.suffix, &request.language).indent;
          let name = path.rsplit('/').next().unwrap_or(path).to_string();
          let mut tally = Tally {
             name: name.clone(),

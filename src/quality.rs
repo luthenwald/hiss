@@ -146,7 +146,7 @@ pub fn indent_problem(text: &str, indent: &Indent) -> Option<&'static str> {
       .find_map(|lead| match indent.unit? {
          Unit::Tabs if lead.contains(' ') => Some("spaces in a tab file"),
          Unit::Spaces(_) if lead.contains('\t') => Some("tabs in a space file"),
-         Unit::Spaces(n) if lead.len() % n != 0 => Some("off the unit"),
+         Unit::Spaces(n) if !indent.aligned && lead.len() % n != 0 => Some("off the unit"),
          _ => None,
       })
 }
@@ -233,6 +233,7 @@ mod tests {
    fn indent(unit: Unit, line: &str, at_line_start: bool) -> Indent {
       Indent {
          unit: Some(unit),
+         aligned: false,
          line: line.into(),
          at_line_start,
       }

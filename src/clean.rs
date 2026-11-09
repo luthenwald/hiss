@@ -18,7 +18,10 @@ impl<'a> Shape<'a> {
    pub fn new(prefix: &str, suffix: &'a str, language: &str) -> Shape<'a> {
       Shape {
          suffix,
-         indent: indent_of(prefix),
+         indent: Indent {
+            aligned: ALIGNED.contains(&language),
+            ..indent_of(prefix)
+         },
          prose_guard: quality::prose_applies(prefix, language),
       }
    }
@@ -109,7 +112,7 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
       .map(|line| columns(leading(line)))
       .collect();
    let scale = match unit {
-      Unit::Spaces(n) if widths.iter().any(|w| w % n != 0) => [4, 2, 8]
+      Unit::Spaces(n) if !indent.aligned && widths.iter().any(|w| w % n != 0) => [4, 2, 8]
          .into_iter()
          .find(|&m| m != n && widths.iter().all(|w| w % m == 0))
          .map(|m| (n, m)),
@@ -197,7 +200,23 @@ pub struct Indent {
    pub line: String,
    /// Only whitespace sits before the cursor on its line.
    pub at_line_start: bool,
+   /// Lines align with brackets rather than step by units (Lisps), so their
+   /// depth is never rescaled.
+   pub aligned: bool,
 }
+
+/// Languages whose lines align with brackets rather than step by a unit.
+const ALIGNED: [&str; 9] = [
+   "scheme",
+   "racket",
+   "lisp",
+   "common-lisp",
+   "clojure",
+   "fennel",
+   "elisp",
+   "janet",
+   "hy",
+];
 
 fn leading(line: &str) -> &str {
    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
@@ -242,6 +261,7 @@ pub fn indent_of(prefix: &str) -> Indent {
       unit,
       line: leading(last).to_string(),
       at_line_start: last.trim().is_empty(),
+      aligned: false,
    }
 }
 
@@ -295,6 +315,7 @@ mod tests {
          unit: Some(unit),
          line: line.into(),
          at_line_start: line.trim().is_empty(),
+         aligned: false,
       };
       follow_indent(text, &indent)
    }
@@ -345,6 +366,13 @@ mod tests {
       );
       assert_eq!(follow("a\n    b", Unit::Spaces(2), "x"), "a\n    b");
       assert_eq!(follow("a\n       b", Unit::Spaces(3), "x"), "a\n       b");
+   }
+
+   #[test]
+   fn aligned_lines_keep_their_depth() {
+      let shape = Shape::new("(define (f)\n   (let* ([a 1]\n          ", "", "scheme");
+      let reply = "[b 2])\n       (+ a b))";
+      assert_eq!(super::clean(reply, &shape).text, reply);
    }
 
    #[test]
