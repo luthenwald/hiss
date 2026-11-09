@@ -32,6 +32,9 @@
 ;; The primary cursor, as a char index.
 (define (adapter.cursor) (cursor-position))
 
+;; The document's length in chars.
+(define (adapter.length) (text.rope-len-chars (adapter.rope)))
+
 ;; Up to `before` chars before `index` and `after` chars after it, as two
 ;; strings. libhiss trims both at line boundaries.
 (define (adapter.text-around index before after)
@@ -57,25 +60,34 @@
 
 ;;; the ghost
 
-;; What is showing: the text (or #f) and the char index it was drawn at.
+;; What is showing: the text (or #f), the char index it was drawn at, and the
+;; document's length then.
 (define ghost-text #f)
 (define ghost-index 0)
+(define ghost-length 0)
 
-;; Helix moves inlay hints along with edits, so by the time a hook clears the
-;; ghost, an edit at the cursor (Enter, a typed char, backspace) has carried
-;; the hint to the new cursor position. Removing it only where it was drawn
-;; would leave it on screen for good, so it is removed there and at the cursor.
+;; Helix moves inlay hints along with edits, and a hint goes after text
+;; inserted at its own index (Assoc::After, helix-view/src/document.rs). So
+;; by the time a hook clears the ghost, one edit has left it either where it
+;; was (an edit after it) or shifted by the change in length (a typed char,
+;; Enter and its indent, an auto-pair, backspace). Removing it only where it
+;; was drawn would leave it on screen for good, so it is removed at both, and
+;; at the cursor for good measure.
 (define (ghost-hide!)
    (when ghost-text
-      (adapter.remove-hint! ghost-index ghost-text)
-      (let ([cursor (adapter.cursor)])
-         (unless (= cursor ghost-index)
+      (let* ([moved (+ ghost-index (- (adapter.length) ghost-length))]
+             [cursor (adapter.cursor)])
+         (adapter.remove-hint! ghost-index ghost-text)
+         (unless (or (= moved ghost-index) (< moved 0))
+            (adapter.remove-hint! moved ghost-text))
+         (unless (or (= cursor ghost-index) (= cursor moved))
             (adapter.remove-hint! cursor ghost-text))))
    (set! ghost-text #f))
 
 (define (ghost-show! index text)
    (ghost-hide!)
    (set! ghost-index index)
+   (set! ghost-length (adapter.length))
    (set! ghost-text text)
    (adapter.add-hint! index text))
 
