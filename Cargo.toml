@@ -1,0 +1,26 @@
+[package]
+name = "hiss"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# steel-core is added in roadmap step 01, at the revision the Steel fork of Helix uses.
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "stream"] }
+serde_json = "1"
+tokio = { version = "1.54", default-features = false, features = ["rt-multi-thread", "sync", "time"] }
+
+# No panic = "abort": the library runs inside the editor.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
