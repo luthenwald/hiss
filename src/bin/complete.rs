@@ -1,16 +1,15 @@
 //! Completes fixtures through the API without Helix, for timings and for
 //! judging the replies.
 //!
-//! usage: complete [--check] [--show] [--no-guard] [--compare] [--runs n] <fixture>...
+//! usage: complete [--check] [--show] [--no-guard] [--runs n] <fixture>...
 //!
-//! A fixture marks the cursor with `<|>`. Without `--check`, the first run's
+//! A fixture marks the cursor with `<|>`, the last one when the file has
+//! several (a source file may contain the marker itself). Without `--check`, the first run's
 //! completion is printed between rules, every run prints its timing, and the
 //! medians follow. With `--check`, every reply is judged (`hiss::quality`):
 //! the failing ones are printed (all of them with `--show`), then a table of
 //! clean counts per fixture. `--no-guard` leaves prose in, to study what
-//! the model writes. `--compare` alternates runs with and without the
-//! worked examples and prints both medians, so drift in the API's speed
-//! falls on both alike.
+//! the model writes.
 
 use std::time::Duration;
 
@@ -47,7 +46,6 @@ struct Options {
    check: bool,
    show: bool,
    guard: bool,
-   compare: bool,
    runs: usize,
    fixtures: Vec<String>,
 }
@@ -57,7 +55,6 @@ fn options() -> Result<Options, String> {
       check: false,
       show: false,
       guard: true,
-      compare: false,
       runs: 5,
       fixtures: Vec::new(),
    };
@@ -67,7 +64,6 @@ fn options() -> Result<Options, String> {
          "--check" => options.check = true,
          "--show" => options.show = true,
          "--no-guard" => options.guard = false,
-         "--compare" => options.compare = true,
          "--runs" => {
             let n = args.next().ok_or("--runs needs a number")?;
             options.runs = n.parse().map_err(|e| format!("--runs: {e}"))?;
@@ -76,10 +72,7 @@ fn options() -> Result<Options, String> {
       }
    }
    if options.fixtures.is_empty() {
-      return Err(
-         "usage: complete [--check] [--show] [--no-guard] [--compare] [--runs n] <fixture>..."
-            .into(),
-      );
+      return Err("usage: complete [--check] [--show] [--no-guard] [--runs n] <fixture>...".into());
    }
    Ok(options)
 }
@@ -87,7 +80,7 @@ fn options() -> Result<Options, String> {
 fn request(path: &str) -> Result<Request, String> {
    let source = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
    let (prefix, suffix) = source
-      .split_once(CURSOR)
+      .rsplit_once(CURSOR)
       .ok_or(format!("{path} has no <|> marker"))?;
    Ok(Request {
       prefix: prefix.into(),
@@ -125,28 +118,6 @@ fn main() -> Result<(), String> {
    RUNTIME.block_on(async {
       let warm = client.warm().await?;
       println!("warm-up {} ms", warm.as_millis());
-      if options.compare {
-         let without = Settings {
-            examples: false,
-            ..settings.clone()
-         };
-         for path in &options.fixtures {
-            let request = request(path)?;
-            let (mut a, mut b) = (Vec::new(), Vec::new());
-            for _ in 0..options.runs {
-               let timing = client.complete(&request, &without, |_| {}).await?;
-               a.extend(timing.first_text);
-               let timing = client.complete(&request, &settings, |_| {}).await?;
-               b.extend(timing.first_text);
-            }
-            println!(
-               "{path}: median ttft without examples {}, with {}",
-               ms(median(a)),
-               ms(median(b))
-            );
-         }
-         return Ok(());
-      }
       let mut tallies = Vec::new();
       for path in &options.fixtures {
          let request = request(path)?;

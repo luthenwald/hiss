@@ -18,29 +18,11 @@ const VERSION: &str = "2023-06-01";
 /// server too.
 const BLANK_LINE: &str = "\n\n";
 
-/// The instructions, kept short: a list of rules made the model reason about
-/// them aloud (`just quality`). The examples below carry the details.
-const SYSTEM: &str = "\
-You are the inline completion engine of a code editor. Each message is the file being edited, with <CURSOR/> at the cursor. Reply with only the code to insert at the cursor, exactly as it should appear in the file, with the file's indentation. Never explain or comment on the code, even when the file is broken or unfinished; just complete what is being typed. When nothing fits, reply with nothing.";
-
-/// Worked examples, sent as earlier turns: a broken file completed without
-/// comment, a block opened at the cursor, and stray text after the cursor
-/// left alone. Other languages than the Rust fixtures, so `just quality`
-/// stays a fair test.
-const EXAMPLES: [(&str, &str); 3] = [
-   (
-      "<file path=\"example/tally.py\" lang=\"python\" indent=\"4 spaces\">\ndef tally(items):\n    counts = {}\n    for item in items\n        <CURSOR/>\n    return counts\n</file>",
-      "counts[item] = counts.get(item, 0) + 1",
-   ),
-   (
-      "<file path=\"example/total.ts\" lang=\"typescript\" indent=\"2 spaces\">\nexport function total(values: number[]): number {\n  let sum = 0;\n  for (const value of values) {<CURSOR/>\n  }\n  return sum;\n}\n</file>",
-      "\n    sum += value;",
-   ),
-   (
-      "<file path=\"example/names.go\" lang=\"go\" indent=\"tabs\">\nfunc names(users []User) []string {\n\tout := make([]string, 0, len(users))\n\tfor _, u := range users {\n\t\t<CURSOR/>}}\n\t}\n\treturn out\n}\n</file>",
-      "out = append(out, u.Name)",
-   ),
-];
+/// The instructions. One sentence on purpose: a fuller prompt, with rules
+/// or with worked examples, made the model explain ordinary code instead of
+/// completing it (`just quality`, 2026-11-09). Broken files are left to the
+/// cleaning, which cuts prose.
+const SYSTEM: &str = "You are a code completion engine. Output only the exact text to insert at <CURSOR/>. No prose, no code fences, no repetition of text after the cursor.";
 
 /// Everything that shapes a request, with the defaults of spec 04/08 and 06/08.
 #[derive(Debug, Clone)]
@@ -53,8 +35,6 @@ pub struct Settings {
    pub suffix_chars: usize,
    /// Cut prose from replies (`clean::Shape`). Off only to study raw replies.
    pub prose_guard: bool,
-   /// Send the worked examples before the file.
-   pub examples: bool,
 }
 
 impl Default for Settings {
@@ -65,7 +45,6 @@ impl Default for Settings {
          prefix_chars: 8_000,
          suffix_chars: 2_000,
          prose_guard: true,
-         examples: true,
       }
    }
 }
@@ -266,22 +245,6 @@ impl Client {
    }
 }
 
-/// The examples as turns (when `examples`), then the file.
-fn messages(file: String, examples: bool) -> Value {
-   let shown = if examples { &EXAMPLES[..] } else { &[] };
-   let mut turns: Vec<Value> = shown
-      .iter()
-      .flat_map(|(user, assistant)| {
-         [
-            json!({ "role": "user", "content": user }),
-            json!({ "role": "assistant", "content": assistant }),
-         ]
-      })
-      .collect();
-   turns.push(json!({ "role": "user", "content": file }));
-   Value::Array(turns)
-}
-
 /// The request body of spec 04/08. No sampling parameters and no prefill:
 /// both return a 400 on the 5.5 models. No stop sequence either (see
 /// `BLANK_LINE`).
@@ -304,7 +267,7 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
       "thinking": { "type": "disabled" },
       "output_config": { "effort": "low" },
       "system": [{ "type": "text", "text": SYSTEM }],
-      "messages": messages(file, settings.examples),
+      "messages": [{ "role": "user", "content": file }],
    })
 }
 
