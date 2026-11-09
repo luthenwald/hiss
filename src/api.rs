@@ -18,18 +18,29 @@ const VERSION: &str = "2023-06-01";
 /// server too.
 const BLANK_LINE: &str = "\n\n";
 
-/// The instructions. The rules answer what went wrong in the quality check
-/// (`just quality`): commentary on broken files, and indentation that did not
-/// follow the file.
+/// The instructions, kept short: a list of rules made the model reason about
+/// them aloud (`just quality`). The examples below carry the details.
 const SYSTEM: &str = "\
-You are the inline completion engine of a code editor. The user sends the file they are editing, with <CURSOR/> where the cursor is. You reply with the text to insert at the cursor, and nothing else.
+You are the inline completion engine of a code editor. Each message is the file being edited, with <CURSOR/> at the cursor. Reply with only the code to insert at the cursor, exactly as it should appear in the file, with the file's indentation. Never explain or comment on the code, even when the file is broken or unfinished; just complete what is being typed. When nothing fits, reply with nothing.";
 
-Rules:
-- Reply with code only, exactly as it should appear in the file. Never explain, comment on, or describe the code, and never talk to the user, even when the file looks broken or unfinished: then complete what the author is typing at the cursor and leave the rest alone.
-- Never repeat text that already follows the cursor.
-- Indent with the unit in the file's indent attribute, or as the file does when there is none. Each new line of your reply starts at column zero, so write its full indentation.
-- When the cursor ends a line that opens a block, start your reply with a line break, then the block's first line at one level deeper.
-- Stop at the end of the current statement or block. When nothing sensible fits, reply with nothing.";
+/// Worked examples, sent as earlier turns: a broken file completed without
+/// comment, a block opened at the cursor, and stray text after the cursor
+/// left alone. Other languages than the Rust fixtures, so `just quality`
+/// stays a fair test.
+const EXAMPLES: [(&str, &str); 3] = [
+   (
+      "<file path=\"example/tally.py\" lang=\"python\" indent=\"4 spaces\">\ndef tally(items):\n    counts = {}\n    for item in items\n        <CURSOR/>\n    return counts\n</file>",
+      "counts[item] = counts.get(item, 0) + 1",
+   ),
+   (
+      "<file path=\"example/total.ts\" lang=\"typescript\" indent=\"2 spaces\">\nexport function total(values: number[]): number {\n  let sum = 0;\n  for (const value of values) {<CURSOR/>\n  }\n  return sum;\n}\n</file>",
+      "\n    sum += value;",
+   ),
+   (
+      "<file path=\"example/names.go\" lang=\"go\" indent=\"tabs\">\nfunc names(users []User) []string {\n\tout := make([]string, 0, len(users))\n\tfor _, u := range users {\n\t\t<CURSOR/>}}\n\t}\n\treturn out\n}\n</file>",
+      "out = append(out, u.Name)",
+   ),
+];
 
 /// Everything that shapes a request, with the defaults of spec 04/08 and 06/08.
 #[derive(Debug, Clone)]
@@ -40,6 +51,10 @@ pub struct Settings {
    pub prefix_chars: usize,
    /// About 500 tokens after the cursor.
    pub suffix_chars: usize,
+   /// Cut prose from replies (`clean::Shape`). Off only to study raw replies.
+   pub prose_guard: bool,
+   /// Send the worked examples before the file.
+   pub examples: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +64,8 @@ impl Default for Settings {
          max_tokens: 96,
          prefix_chars: 8_000,
          suffix_chars: 2_000,
+         prose_guard: true,
+         examples: true,
       }
    }
 }
@@ -168,11 +185,12 @@ impl Client {
       settings: &Settings,
       mut on_text: impl FnMut(&str),
    ) -> Result<Timing, String> {
-      let shape = clean::Shape::new(
+      let mut shape = clean::Shape::new(
          clean::tail_lines(&request.prefix, settings.prefix_chars),
          clean::head_lines(&request.suffix, settings.suffix_chars),
          &request.language,
       );
+      shape.prose_guard &= settings.prose_guard;
       let body = body(request, settings);
       let start = Instant::now();
       let mut response = self
@@ -248,6 +266,22 @@ impl Client {
    }
 }
 
+/// The examples as turns (when `examples`), then the file.
+fn messages(file: String, examples: bool) -> Value {
+   let shown = if examples { &EXAMPLES[..] } else { &[] };
+   let mut turns: Vec<Value> = shown
+      .iter()
+      .flat_map(|(user, assistant)| {
+         [
+            json!({ "role": "user", "content": user }),
+            json!({ "role": "assistant", "content": assistant }),
+         ]
+      })
+      .collect();
+   turns.push(json!({ "role": "user", "content": file }));
+   Value::Array(turns)
+}
+
 /// The request body of spec 04/08. No sampling parameters and no prefill:
 /// both return a 400 on the 5.5 models. No stop sequence either (see
 /// `BLANK_LINE`).
@@ -270,7 +304,7 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
       "thinking": { "type": "disabled" },
       "output_config": { "effort": "low" },
       "system": [{ "type": "text", "text": SYSTEM }],
-      "messages": [{ "role": "user", "content": file }],
+      "messages": messages(file, settings.examples),
    })
 }
 
@@ -295,7 +329,7 @@ mod tests {
       let messages = body["messages"].as_array().unwrap();
       assert_eq!(messages.last().unwrap()["role"], "user");
       assert_eq!(
-         messages[0]["content"],
+         messages.last().unwrap()["content"],
          "<file path=\"src/&quot;main&quot;.rs\" lang=\"rust\" indent=\"3 spaces\">\nfn main() {\n   let x = <CURSOR/>;\n}\n\n</file>"
       );
    }
@@ -308,7 +342,9 @@ mod tests {
          ..Request::default()
       };
       let body = body(&request, &Settings::default());
-      let content = body["messages"][0]["content"].as_str().unwrap();
+      let content = body["messages"].as_array().unwrap().last().unwrap()["content"]
+         .as_str()
+         .unwrap();
       assert!(content.len() < 10_200);
       assert!(content.contains("\na\n<CURSOR/>b\n"));
    }
