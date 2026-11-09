@@ -13,5 +13,6 @@ impl<'a> Samples<'a> {
       if self.values.is_empty() {
          return None;
       }
+      let sum: f64 = <|>
    }
 }
