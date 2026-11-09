@@ -91,6 +91,65 @@ pub fn prose_applies(prefix: &str, language: &str) -> bool {
       && !in_docstring(prefix)
 }
 
+/// The start of a line, or of words glued to code, that has fewer than
+/// three words so far and could still open a sentence: a capitalised word,
+/// then lowercase ones. Shown only once it is clearly one or the other, so
+/// a sentence never flashes on screen before the cut.
+fn may_open_sentence(text: &str) -> bool {
+   let line = without_code_spans(text);
+   let tokens: Vec<&str> = line.split_whitespace().collect();
+   match tokens[..] {
+      [] => false,
+      [first, ref rest @ ..] if rest.len() < 2 => {
+         first.chars().next().is_some_and(char::is_uppercase)
+            && is_word(first)
+            && (first.chars().count() <= 2 || is_opening_word(first))
+            && rest.iter().all(|t| is_lower_word(t))
+      }
+      _ => false,
+   }
+}
+
+/// Where the text still being written may turn out to be prose, as a byte
+/// offset: its last line (which is not complete yet), or words glued to
+/// closing code on it.
+pub fn pending(text: &str) -> Option<usize> {
+   let start = text.rfind('\n').map_or(0, |at| at + 1);
+   let line = &text[start..];
+   let indent = line.len() - line.trim_start().len();
+   if !in_docstring(&text[..start]) && may_open_sentence(&line[indent..]) {
+      return Some(start);
+   }
+   line.char_indices().find_map(|(i, c)| {
+      let after = i + c.len_utf8();
+      let rest = &line[after..];
+      (CLOSERS.contains(&c)
+         && rest.chars().next().is_some_and(char::is_uppercase)
+         && may_open_sentence(rest))
+      .then_some(start + after)
+   })
+}
+
+/// Words the model puts in parentheses instead of a reply.
+const PLACEHOLDERS: [&str; 7] = [
+   "nothing",
+   "empty",
+   "no completion",
+   "no code",
+   "no change",
+   "no changes",
+   "blank",
+];
+
+/// A whole reply that only stands for no reply, like "(nothing)".
+fn is_placeholder(text: &str) -> bool {
+   text
+      .trim()
+      .strip_prefix('(')
+      .and_then(|t| t.strip_suffix(')'))
+      .is_some_and(|inner| PLACEHOLDERS.contains(&inner.trim().to_lowercase().as_str()))
+}
+
 /// Where prose starts in `text`, as a byte offset, if it does:
 /// - a sentence glued to closing code (`}The mean ...`);
 /// - a line that opens like a sentence (`The cursor sits ...`), which counts
@@ -125,7 +184,11 @@ pub fn prose(text: &str, complete: bool) -> Option<usize> {
       .filter(|&&(at, line)| complete || at + line.len() < text.len())
       .find(|(_, line)| is_sentence(line))
       .map(|&(at, _)| at);
-   [glued, opening, whole].into_iter().flatten().min()
+   let placeholder = is_placeholder(text).then_some(0);
+   [placeholder, glued, opening, whole]
+      .into_iter()
+      .flatten()
+      .min()
 }
 
 /// What is wrong with the reply's indentation, if anything: a first line
@@ -161,6 +224,27 @@ mod tests {
    fn the_users_reply_turns_into_prose_after_the_code() {
       let at = prose(USER_REPLY, false).expect("prose");
       assert!(USER_REPLY[..at].ends_with("} else if false {}"));
+   }
+
+   #[test]
+   fn the_start_of_a_sentence_is_pending() {
+      assert_eq!(pending("let a = 1;\nThe"), Some(11));
+      assert_eq!(pending("let a = 1;\n   The cursor"), Some(11));
+      assert_eq!(pending("x}The mean"), Some(2));
+      assert_eq!(pending("Some"), Some(0));
+      assert_eq!(pending("Some(x"), None);
+      assert_eq!(pending("let a"), None);
+      assert_eq!(pending("SELECT name"), None);
+      assert_eq!(pending("The cursor sits"), None);
+      assert_eq!(pending("let a = 1;\n"), None);
+   }
+
+   #[test]
+   fn a_placeholder_is_no_reply() {
+      assert_eq!(prose("(nothing)", false), Some(0));
+      assert_eq!(prose("  (No completion)\n", false), Some(0));
+      assert_eq!(prose("(nothing-to-do x)", false), None);
+      assert_eq!(prose("(display x)", false), None);
    }
 
    #[test]

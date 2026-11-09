@@ -55,6 +55,10 @@ fn clean_as(raw: &str, shape: &Shape, complete: bool) -> Cleaned {
       .then(|| quality::prose(text, complete))
       .flatten();
    let text = cut.map_or(text, |at| text[..at].trim_end());
+   let held = (shape.prose_guard && !complete && cut.is_none())
+      .then(|| quality::pending(text))
+      .flatten();
+   let text = held.map_or(text, |at| text[..at].trim_end());
    let text = &text[..text.len() - suffix_overlap(text, shape.suffix)];
    Cleaned {
       text: if text.trim().is_empty() {
@@ -71,8 +75,8 @@ const TAB_WIDTH: usize = 4;
 
 /// Brings the reply's indentation in line with the file, on lines that have
 /// content (a line still streaming keeps its whitespace until text arrives):
-/// - at the start of a line, a reply that opens with a line break loses it,
-///   since it would leave the cursor's line empty and start one lower;
+/// - at the start of a line, a reply that opens with blank lines loses them,
+///   since they would leave the cursor's line empty and start lower;
 /// - a first line that repeats the indent the cursor already sits after loses
 ///   it, since `insert_string` would put it in twice;
 /// - later lines use the file's unit, a tab standing for one unit;
@@ -82,7 +86,11 @@ const TAB_WIDTH: usize = 4;
 /// When the unit is unknown, only the first rule applies.
 fn follow_indent(text: &str, indent: &Indent) -> String {
    let text = if indent.at_line_start {
-      text.trim_start_matches('\n')
+      let blank = text.len() - text.trim_start().len();
+      match text[..blank].rfind('\n') {
+         Some(newline) => &text[newline + 1..],
+         None => text,
+      }
    } else {
       text
    };
@@ -339,6 +347,10 @@ mod tests {
          "let a = 1;\n      a"
       );
       assert_eq!(follow("\n   a", Unit::Spaces(3), "x {"), "\n   a");
+      assert_eq!(
+         follow("  \n\npub fn f()", Unit::Spaces(3), ""),
+         "pub fn f()"
+      );
    }
 
    #[test]
@@ -400,6 +412,15 @@ mod tests {
       let end = super::clean_end(raw, &shape);
       assert_eq!(end.text, "let a = 1;");
       assert!(end.prose);
+   }
+
+   #[test]
+   fn a_sentence_does_not_flash_before_the_cut() {
+      let shape = Shape::new("fn f() {\n   ", "\n}\n", "rust");
+      assert_eq!(super::clean("The cur", &shape).text, "");
+      assert_eq!(super::clean("let a = 1;\nThe", &shape).text, "let a = 1;");
+      assert_eq!(super::clean("Some(a", &shape).text, "Some(a");
+      assert_eq!(super::clean_end("None", &shape).text, "None");
    }
 
    #[test]
