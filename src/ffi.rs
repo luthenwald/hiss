@@ -172,13 +172,17 @@ pub fn accepted(chars: usize) -> Result<bool, String> {
 }
 
 /// `(hiss-config name)`: a setting `hiss.scm` needs itself, from
-/// `config.toml`: `"enabled"` (a boolean) or `"debounce"` (milliseconds).
-/// Any other name gives `#f`.
+/// `config.toml`: `"enabled"` (a boolean), `"debounce"` (milliseconds), or
+/// `"context_before"` and `"context_after"` (chars). Any other name gives
+/// `#f`.
 pub fn config_value(name: String) -> FFIValue {
    let config = config::config();
+   let int = |n: usize| FFIValue::IntV(n as isize);
    guarded("hiss-config", || match name.as_str() {
       "enabled" => FFIValue::BoolV(config.enabled),
-      "debounce" => FFIValue::IntV(config.debounce as isize),
+      "debounce" => int(config.debounce as usize),
+      "context_before" => int(config.request.prefix_chars),
+      "context_after" => int(config.request.suffix_chars),
       _ => FFIValue::BoolV(false),
    })
    .unwrap_or(FFIValue::BoolV(false))

@@ -97,6 +97,12 @@
 
 (define enabled (native.hiss-config "enabled"))
 (define debounce-ms (native.hiss-config "debounce"))
+
+;; How much text around the cursor to hand libhiss: one char more on each
+;; side than it sends, so that it can tell a line it must cut from the
+;; start or end of the file.
+(define context-before (+ (native.hiss-config "context_before") 1))
+(define context-after (+ (native.hiss-config "context_after") 1))
 (define config-problem (native.hiss-config-problem))
 
 ;;; the ghost
@@ -185,7 +191,7 @@
 (define (request! report)
    (clear!)
    (let* ([index (adapter.cursor)]
-          [around (adapter.text-around index 10000 2500)]
+          [around (adapter.text-around index context-before context-after)]
           [id (native.hiss-start! (car around) (cadr around) (adapter.language) (adapter.path))])
       (if id
           (begin
