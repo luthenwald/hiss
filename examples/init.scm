@@ -1,5 +1,4 @@
-;; How a user loads hiss, in ~/.config/helix/init.scm.
-;; `just hx` runs the fork with this directory as its Steel config.
+;; How to load hiss, in ~/.config/helix/init.scm.
 
 (require "helix/keymaps.scm")
 (require "hiss/hiss.scm")
