@@ -35,6 +35,9 @@ pub struct Settings {
    pub retries: u32,
    /// Times to ask again after a reply that was only prose.
    pub prose_retries: u32,
+   /// Send the file's far part as its own block, marked for prompt caching
+   /// (`cache_split`). For measuring with `just bench` only, for now.
+   pub cache_file: bool,
 }
 
 impl Default for Settings {
@@ -47,6 +50,7 @@ impl Default for Settings {
          prose_guard: true,
          retries: 1,
          prose_retries: 1,
+         cache_file: false,
       }
    }
 }
@@ -416,9 +420,19 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
       clean::Typed::Word(word) => format!("\n{}", word_note(&word)),
       _ => String::new(),
    };
-   let file = format!(
-      "<file path=\"{path}\" lang=\"{language}\"{indent}>\n{sent}<CURSOR/>{suffix}\n</file>{note}"
-   );
+   let open = format!("<file path=\"{path}\" lang=\"{language}\"{indent}>\n");
+   let near = |text: &str| format!("{text}<CURSOR/>{suffix}\n</file>{note}");
+   let content = match cache_split(sent) {
+      Some(at) if settings.cache_file => json!([
+         {
+            "type": "text",
+            "text": format!("{open}{}", &sent[..at]),
+            "cache_control": { "type": "ephemeral" },
+         },
+         { "type": "text", "text": near(&sent[at..]) },
+      ]),
+      _ => json!(format!("{open}{}", near(sent))),
+   };
    json!({
       "model": settings.model,
       "max_tokens": settings.max_tokens,
@@ -426,8 +440,20 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
       "thinking": { "type": "disabled" },
       "output_config": { "effort": "low" },
       "system": [{ "type": "text", "text": SYSTEM }],
-      "messages": [{ "role": "user", "content": file }],
+      "messages": [{ "role": "user", "content": content }],
    })
+}
+
+/// Where the cached part of the file ends: the last line start at least
+/// `NEAR` bytes before the cursor, so edits near the cursor leave it alone.
+/// `None` when the file before the cursor is shorter than that.
+fn cache_split(sent: &str) -> Option<usize> {
+   const NEAR: usize = 1_000;
+   let mut end = sent.len().checked_sub(NEAR)?;
+   while !sent.is_char_boundary(end) {
+      end -= 1;
+   }
+   sent[..end].rfind('\n').map(|i| i + 1)
 }
 
 #[cfg(test)]
@@ -453,6 +479,44 @@ mod tests {
       assert_eq!(
          messages.last().unwrap()["content"],
          "<file path=\"src/&quot;main&quot;.rs\" lang=\"rust\" indent=\"3 spaces\">\nfn main() {\n   let x = <CURSOR/>;\n}\n\n</file>"
+      );
+   }
+
+   #[test]
+   fn cached_body_splits_far_from_the_cursor() {
+      let request = Request {
+         prefix: format!("{}let x = ", "far line\n".repeat(200)),
+         suffix: ";\n".into(),
+         language: "rust".into(),
+         path: "a.rs".into(),
+      };
+      let plain = body(&request, &Settings::default());
+      let cached = body(
+         &request,
+         &Settings {
+            cache_file: true,
+            ..Settings::default()
+         },
+      );
+      let blocks = cached["messages"][0]["content"].as_array().unwrap();
+      assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+      let far = blocks[0]["text"].as_str().unwrap();
+      let near = blocks[1]["text"].as_str().unwrap();
+      assert!(far.ends_with('\n') && near.len() >= 1_000);
+      assert_eq!(format!("{far}{near}"), plain["messages"][0]["content"]);
+      let short = Request {
+         prefix: "let x = ".into(),
+         ..request
+      };
+      assert!(
+         body(
+            &short,
+            &Settings {
+               cache_file: true,
+               ..Settings::default()
+            }
+         )["messages"][0]["content"]
+            .is_string()
       );
    }
 

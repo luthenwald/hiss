@@ -1,7 +1,9 @@
 //! Completes fixtures through the API without Helix, for timings and for
 //! judging the replies.
 //!
-//! usage: complete [--check] [--show] [--no-guard] [--runs n] <fixture>...
+//! usage: complete [--check] [--show] [--no-guard] [--runs n]
+//!                 [--before a,b] [--after a,b] [--max-tokens a,b] [--cache off,on]
+//!                 <fixture>...
 //!
 //! A fixture marks the cursor with `<|>`, the last one when the file has
 //! several (a source file may contain the marker itself). Without `--check`, the first run's
@@ -10,6 +12,12 @@
 //! the failing ones are printed (all of them with `--show`), then a table of
 //! clean counts per fixture. `--no-guard` leaves prose in, to study what
 //! the model writes.
+//!
+//! `--before`, `--after`, `--max-tokens` and `--cache` take lists, and every
+//! combination is a variant. Each run asks once per variant, in turn, since
+//! the API's speed drifts over minutes and only interleaved runs compare;
+//! the medians per variant follow, with the first run's time to first text
+//! apart, since the first request after the warm-up can be slower.
 
 use std::time::Duration;
 
@@ -48,15 +56,70 @@ struct Options {
    show: bool,
    guard: bool,
    runs: usize,
+   before: Vec<usize>,
+   after: Vec<usize>,
+   max_tokens: Vec<u32>,
+   cache: Vec<bool>,
    fixtures: Vec<String>,
 }
 
+/// A comma-separated list of values.
+fn list<T: std::str::FromStr>(flag: &str, text: Option<String>) -> Result<Vec<T>, String> {
+   let text = text.ok_or(format!("{flag} needs a list"))?;
+   text
+      .split(',')
+      .map(|item| {
+         item
+            .trim()
+            .parse()
+            .map_err(|_| format!("{flag}: cannot read {item}"))
+      })
+      .collect()
+}
+
+/// Every combination of the listed values, each named by the values that
+/// vary.
+fn variants(options: &Options, base: &Settings) -> Vec<(String, Settings)> {
+   let o = options;
+   o.before
+      .iter()
+      .flat_map(|&b| o.after.iter().map(move |&a| (b, a)))
+      .flat_map(|(b, a)| o.max_tokens.iter().map(move |&m| (b, a, m)))
+      .flat_map(|(b, a, m)| o.cache.iter().map(move |&c| (b, a, m, c)))
+      .map(|(before, after, max_tokens, cache)| {
+         let label = [
+            (o.before.len() > 1).then(|| format!("before={before}")),
+            (o.after.len() > 1).then(|| format!("after={after}")),
+            (o.max_tokens.len() > 1).then(|| format!("max={max_tokens}")),
+            (o.cache.len() > 1).then(|| format!("cache={}", if cache { "on" } else { "off" })),
+         ]
+         .into_iter()
+         .flatten()
+         .collect::<Vec<_>>()
+         .join(" ");
+         let settings = Settings {
+            prefix_chars: before,
+            suffix_chars: after,
+            max_tokens,
+            cache_file: cache,
+            ..base.clone()
+         };
+         (label, settings)
+      })
+      .collect()
+}
+
 fn options() -> Result<Options, String> {
+   let base = Settings::default();
    let mut options = Options {
       check: false,
       show: false,
       guard: true,
       runs: 5,
+      before: vec![base.prefix_chars],
+      after: vec![base.suffix_chars],
+      max_tokens: vec![base.max_tokens],
+      cache: vec![false],
       fixtures: Vec::new(),
    };
    let mut args = std::env::args().skip(1);
@@ -69,11 +132,24 @@ fn options() -> Result<Options, String> {
             let n = args.next().ok_or("--runs needs a number")?;
             options.runs = n.parse().map_err(|e| format!("--runs: {e}"))?;
          }
+         "--before" => options.before = list(&arg, args.next())?,
+         "--after" => options.after = list(&arg, args.next())?,
+         "--max-tokens" => options.max_tokens = list(&arg, args.next())?,
+         "--cache" => {
+            options.cache = list::<String>(&arg, args.next())?
+               .iter()
+               .map(|word| match word.as_str() {
+                  "on" => Ok(true),
+                  "off" => Ok(false),
+                  _ => Err(format!("--cache: on or off, not {word}")),
+               })
+               .collect::<Result<_, _>>()?
+         }
          _ => options.fixtures.push(arg),
       }
    }
    if options.fixtures.is_empty() {
-      return Err("usage: complete [--check] [--show] [--no-guard] [--runs n] <fixture>...".into());
+      return Err("usage: complete [--check] [--show] [--no-guard] [--runs n] [--before a,b] [--after a,b] [--max-tokens a,b] [--cache off,on] <fixture>...".into());
    }
    Ok(options)
 }
@@ -121,6 +197,9 @@ fn main() -> Result<(), String> {
    RUNTIME.block_on(async {
       let warm = client.warm().await?;
       println!("warm-up {} ms", warm.as_millis());
+      if !options.check {
+         return bench(&client, &options, &settings).await;
+      }
       let mut tallies = Vec::new();
       for path in &options.fixtures {
          let request = request(path)?;
@@ -136,10 +215,6 @@ fn main() -> Result<(), String> {
             .parent()
             .map(|dir| dir.join("../expect").join(&name))
             .and_then(|file| std::fs::read_to_string(file).ok());
-         let mut totals = Vec::new();
-         if !options.check {
-            println!("{path}");
-         }
          for run in 1..=options.runs {
             let mut last = String::new();
             let mut back = 0;
@@ -151,14 +226,6 @@ fn main() -> Result<(), String> {
                .await?;
             tally.runs += 1;
             tally.ttfts.extend(timing.first_text);
-            totals.push(timing.total);
-            if !options.check {
-               if run == 1 {
-                  println!("{}\n{last}\n{}", rule(), rule());
-               }
-               println!("{run:>2}  {timing}");
-               continue;
-            }
             if timing.stop_reason == "prose" {
                tally.cut += 1;
             }
@@ -198,49 +265,81 @@ fn main() -> Result<(), String> {
                println!("{last}\n{}", rule());
             }
          }
-         if !options.check {
-            println!(
-               "median ttft {}, total {}",
-               ms(median(tally.ttfts.clone())),
-               ms(median(totals))
-            );
-         }
          tallies.push(tally);
       }
-      if options.check {
-         println!(
-            "\n{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
-            "fixture", "clean", "prose", "indent", "joint", "empty", "cut", "retry", "ttft"
-         );
-         for t in &tallies {
-            println!(
-               "{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
-               t.name,
-               format!("{}/{}", t.clean, t.runs),
-               t.prose,
-               t.indent,
-               t.joint,
-               t.empty,
-               t.cut,
-               t.retried,
-               ms(median(t.ttfts.clone()))
-            );
-         }
-         let sum = |f: fn(&Tally) -> usize| tallies.iter().map(f).sum::<usize>();
-         let ttfts = tallies.iter().flat_map(|t| t.ttfts.clone()).collect();
+      println!(
+         "\n{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
+         "fixture", "clean", "prose", "indent", "joint", "empty", "cut", "retry", "ttft"
+      );
+      for t in &tallies {
          println!(
             "{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
-            "all",
-            format!("{}/{}", sum(|t| t.clean), sum(|t| t.runs)),
-            sum(|t| t.prose),
-            sum(|t| t.indent),
-            sum(|t| t.joint),
-            sum(|t| t.empty),
-            sum(|t| t.cut),
-            sum(|t| t.retried),
-            ms(median(ttfts))
+            t.name,
+            format!("{}/{}", t.clean, t.runs),
+            t.prose,
+            t.indent,
+            t.joint,
+            t.empty,
+            t.cut,
+            t.retried,
+            ms(median(t.ttfts.clone()))
          );
       }
+      let sum = |f: fn(&Tally) -> usize| tallies.iter().map(f).sum::<usize>();
+      let ttfts = tallies.iter().flat_map(|t| t.ttfts.clone()).collect();
+      println!(
+         "{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
+         "all",
+         format!("{}/{}", sum(|t| t.clean), sum(|t| t.runs)),
+         sum(|t| t.prose),
+         sum(|t| t.indent),
+         sum(|t| t.joint),
+         sum(|t| t.empty),
+         sum(|t| t.cut),
+         sum(|t| t.retried),
+         ms(median(ttfts))
+      );
       Ok(())
    })
+}
+
+/// Times every variant on every fixture, run by run in turn, and prints the
+/// first run's completion, each timing, and the medians per variant.
+async fn bench(client: &Client, options: &Options, base: &Settings) -> Result<(), String> {
+   let variants = variants(options, base);
+   for path in &options.fixtures {
+      let request = request(path)?;
+      println!("{path}");
+      let mut times: Vec<(Vec<Duration>, Vec<Duration>)> = vec![Default::default(); variants.len()];
+      for run in 1..=options.runs {
+         for ((label, settings), (ttfts, totals)) in variants.iter().zip(&mut times) {
+            let mut last = String::new();
+            let timing = client
+               .complete(&request, settings, |text, _| last = text.to_string())
+               .await?;
+            if run == 1 {
+               println!("{}\n{last}\n{}", rule(), rule());
+            }
+            println!("{run:>2}  {label:<14} {timing}");
+            ttfts.push(timing.first_text.unwrap_or(timing.total));
+            totals.push(timing.total);
+         }
+      }
+      println!(
+         "\n{:<24} {:>9} {:>9} {:>9}",
+         "variant", "ttft 2..", "total", "ttft 1"
+      );
+      for ((label, _), (ttfts, totals)) in variants.iter().zip(times) {
+         let first = ttfts.first().copied();
+         let rest = median(ttfts.iter().skip(1).copied().collect());
+         println!(
+            "{:<24} {:>9} {:>9} {:>9}",
+            if label.is_empty() { "default" } else { label },
+            ms(rest.or(first)),
+            ms(median(totals)),
+            ms(first),
+         );
+      }
+   }
+   Ok(())
 }
