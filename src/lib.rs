@@ -12,6 +12,7 @@
 
 pub mod api;
 pub mod clean;
+pub mod config;
 mod ffi;
 mod log;
 pub mod quality;
@@ -44,6 +45,7 @@ fn version() -> Result<String, String> {
 }
 
 fn create_module() -> FFIModule {
+   let _ = guarded("config", || log::set_on(config::config().log));
    ffi::warm_up();
    let mut module = FFIModule::new("hiss/native");
    module
@@ -52,7 +54,8 @@ fn create_module() -> FFIModule {
       .register_fn("hiss-next", ffi::next)
       .register_fn("hiss-cancel!", ffi::cancel)
       .register_fn("hiss-accepted!", ffi::accepted)
-      .register_fn("hiss-log!", ffi::set_log)
+      .register_fn("hiss-config", ffi::config_value)
+      .register_fn("hiss-config-problem", ffi::config_problem)
       .register_fn("hiss-error", ffi::error)
       .register_fn("hiss-timing", ffi::timing);
    module

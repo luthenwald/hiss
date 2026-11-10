@@ -1,0 +1,27 @@
+# hiss settings, in ~/.config/hiss/config.toml. Every line is optional;
+# the values below are the defaults. Restart the editor after a change.
+
+# Suggestions are on when the editor starts (:hiss-toggle switches them).
+enabled = true
+
+# Milliseconds to wait after an edit before asking.
+debounce = 250
+
+# Write how long each suggestion took to ~/.local/state/hiss/hiss.log.
+# The log holds times and sizes, never code, file names or keys.
+log = true
+
+# Times to ask again after an API or network error (overloaded, rate
+# limited, connection lost). Never after a refused request.
+retries = 1
+
+# Times to ask again after a reply that was only prose, not code.
+prose_retries = 1
+
+# The model, and the most tokens one suggestion may use.
+model = "claude-haiku-5-5"
+max_tokens = 96
+
+# How many characters of the file to send before and after the cursor.
+context_before = 8000
+context_after = 2000

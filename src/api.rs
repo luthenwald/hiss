@@ -25,7 +25,7 @@ const BLANK_LINE: &str = "\n\n";
 const SYSTEM: &str = "You are a code completion engine. Output only the exact text to insert at <CURSOR/>. No prose, no code fences, no repetition of text after the cursor.";
 
 /// Everything that shapes a request, with the defaults of spec 04/08 and 06/08.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
    pub model: String,
    pub max_tokens: u32,
@@ -35,6 +35,11 @@ pub struct Settings {
    pub suffix_chars: usize,
    /// Cut prose from replies (`clean::Shape`). Off only to study raw replies.
    pub prose_guard: bool,
+   /// Times to ask again after an API or network error that may pass
+   /// (overloaded, rate limited, a lost connection), before any text showed.
+   pub retries: u32,
+   /// Times to ask again after a reply that was only prose.
+   pub prose_retries: u32,
 }
 
 impl Default for Settings {
@@ -45,6 +50,8 @@ impl Default for Settings {
          prefix_chars: 8_000,
          suffix_chars: 2_000,
          prose_guard: true,
+         retries: 1,
+         prose_retries: 1,
       }
    }
 }
@@ -73,6 +80,8 @@ pub struct Timing {
    pub chars: usize,
    /// The first reply was cut down to nothing as prose, and hiss asked again.
    pub retried: bool,
+   /// How many times hiss asked again after an error.
+   pub error_retries: u32,
 }
 
 impl fmt::Display for Timing {
@@ -99,6 +108,9 @@ impl fmt::Display for Timing {
       )?;
       if self.retried {
          write!(f, ", retried")?;
+      }
+      if self.error_retries > 0 {
+         write!(f, ", {} after errors", self.error_retries)?;
       }
       Ok(())
    }
@@ -163,8 +175,9 @@ impl Client {
    }
 
    /// Streams a completion. `on_text` gets the whole cleaned text each time
-   /// it changes. When the reply is only prose, which the cleaning cuts to
-   /// nothing, it asks once more at once, with the model's prose as its
+   /// it changes, with how many chars before the cursor it starts. When the
+   /// reply is only prose, which the cleaning cuts to nothing, it asks again
+   /// at once (up to `prose_retries` times), with the model's prose as its
    /// earlier turn and a note that only code is wanted. Returns the timing,
    /// or an error for the status line.
    pub async fn complete(
@@ -179,21 +192,51 @@ impl Client {
          &request.language,
       );
       shape.prose_guard &= settings.prose_guard;
-      let first = body(request, settings);
+      let mut body = body(request, settings);
       let start = Instant::now();
       let mut timing = Timing::default();
-      let reply = self
-         .attempt(&first, &shape, start, &mut timing, &mut on_text)
+      let mut reply = self
+         .persist(&body, &shape, settings, start, &mut timing, &mut on_text)
          .await?;
-      if reply.prose && reply.shown.is_empty() && !reply.raw.trim().is_empty() {
+      for _ in 0..settings.prose_retries {
+         if !(reply.prose && reply.shown.is_empty() && !reply.raw.trim().is_empty()) {
+            break;
+         }
          timing.retried = true;
-         let again = retry_body(&first, reply.raw.trim_end());
-         self
-            .attempt(&again, &shape, start, &mut timing, &mut on_text)
+         body = retry_body(&body, reply.raw.trim_end());
+         reply = self
+            .persist(&body, &shape, settings, start, &mut timing, &mut on_text)
             .await?;
       }
       timing.total = start.elapsed();
       Ok(timing)
+   }
+
+   /// One attempt, asked again up to `retries` times after an error that may
+   /// pass, as long as nothing was shown yet, a little later each time.
+   async fn persist(
+      &self,
+      body: &Value,
+      shape: &clean::Shape<'_>,
+      settings: &Settings,
+      start: Instant,
+      timing: &mut Timing,
+      on_text: &mut impl FnMut(&str, usize),
+   ) -> Result<Reply, String> {
+      let mut tries = 0;
+      loop {
+         match self.attempt(body, shape, start, timing, on_text).await {
+            Ok(reply) => return Ok(reply),
+            Err(failure)
+               if failure.transient && tries < settings.retries && timing.first_text.is_none() =>
+            {
+               tries += 1;
+               timing.error_retries += 1;
+               tokio::time::sleep(Duration::from_millis(250 * u64::from(tries))).await;
+            }
+            Err(failure) => return Err(failure.message),
+         }
+      }
    }
 
    /// One request and its stream. Adds what it costs to `timing`.
@@ -204,14 +247,14 @@ impl Client {
       start: Instant,
       timing: &mut Timing,
       on_text: &mut impl FnMut(&str, usize),
-   ) -> Result<Reply, String> {
+   ) -> Result<Reply, Failure> {
       let mut response = self
          .post(MESSAGES)
          .header("content-type", "application/json")
          .body(body.to_string())
          .send()
          .await
-         .map_err(|e| format!("hiss: {e}"))?;
+         .map_err(Failure::network)?;
       if timing.headers.is_zero() {
          timing.headers = start.elapsed();
       }
@@ -219,11 +262,14 @@ impl Client {
       if !status.is_success() {
          let text = response.text().await.unwrap_or_default();
          let detail = serde_json::from_str::<Value>(&text).map(|v| sse::error_text(&v));
-         return Err(format!(
-            "hiss: api {}: {}",
-            status.as_u16(),
-            detail.unwrap_or_else(|_| "no detail".into())
-         ));
+         let code = status.as_u16();
+         return Err(Failure {
+            message: format!(
+               "hiss: api {code}: {}",
+               detail.unwrap_or_else(|_| "no detail".into())
+            ),
+            transient: code == 429 || code >= 500,
+         });
       }
 
       let mut parser = sse::Parser::default();
@@ -242,7 +288,7 @@ impl Client {
             on_text(shown, shown_back);
          }
       };
-      'stream: while let Some(chunk) = response.chunk().await.map_err(|e| format!("hiss: {e}"))? {
+      'stream: while let Some(chunk) = response.chunk().await.map_err(Failure::network)? {
          for event in parser.push(&chunk) {
             match decoder.decode(&event) {
                Some(Message::Text(piece)) => {
@@ -275,7 +321,14 @@ impl Client {
                   timing.stop_reason = reason;
                   timing.output_tokens += output_tokens;
                }
-               Some(Message::Error(text)) => return Err(format!("hiss: api error: {text}")),
+               Some(Message::Error(text)) => {
+                  return Err(Failure {
+                     transient: ["overloaded", "rate_limit", "rate limit"]
+                        .iter()
+                        .any(|kind| text.to_lowercase().contains(kind)),
+                     message: format!("hiss: api error: {text}"),
+                  });
+               }
                Some(Message::End) => break 'stream,
                None => {}
             }
@@ -290,6 +343,23 @@ impl Client {
       }
       timing.chars = shown.chars().count();
       Ok(Reply { raw, shown, prose })
+   }
+}
+
+/// Why an attempt failed, and whether asking again may help: yes for a
+/// lost connection, a rate limit or an overloaded server, no for a request
+/// the API refused.
+struct Failure {
+   message: String,
+   transient: bool,
+}
+
+impl Failure {
+   fn network(error: reqwest::Error) -> Failure {
+      Failure {
+         message: format!("hiss: {error}"),
+         transient: !error.is_builder() && !error.is_decode(),
+      }
    }
 }
 

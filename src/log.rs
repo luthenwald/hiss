@@ -62,6 +62,9 @@ pub fn timing_fields(timing: &Timing) -> String {
    if timing.retried {
       fields.push_str(" retried");
    }
+   if timing.error_retries > 0 {
+      fields.push_str(&format!(" again={}", timing.error_retries));
+   }
    fields
 }
 

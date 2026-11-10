@@ -16,10 +16,9 @@
 
 (#%require-dylib "libhiss"
    (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-error hiss-timing
-                               hiss-accepted! hiss-log!)))
+                               hiss-accepted! hiss-config hiss-config-problem)))
 
-(provide hiss-configure
-         hiss-on
+(provide hiss-on
          hiss-off
          hiss-toggle
          hiss-accept
@@ -90,21 +89,15 @@
 (define (adapter.after! ms thunk) (enqueue-thread-local-callback-with-delay ms thunk))
 
 ;;; settings
+;;
+;; From ~/.config/hiss/config.toml, which libhiss reads when it loads (see
+;; examples/config.toml). A line it cannot read keeps its default, and the
+;; status line names it the first time insert mode starts (a message set
+;; while the editor starts up is soon written over).
 
-(define enabled #t)
-(define debounce-ms 150)
-(define log-on #t)
-
-;;@doc
-;; Change hiss's settings from init.scm, for example
-;; (hiss-configure #:debounce 200). Settings left out keep their value.
-;;   #:debounce  milliseconds to wait after an edit before asking (150)
-;;   #:log       write timings and sizes to ~/.local/state/hiss/hiss.log (#t)
-(define (hiss-configure #:debounce [debounce debounce-ms] #:log [log log-on])
-   (set! debounce-ms debounce)
-   (set! log-on log)
-   (native.hiss-log! log)
-   void)
+(define enabled (native.hiss-config "enabled"))
+(define debounce-ms (native.hiss-config "debounce"))
+(define config-problem (native.hiss-config-problem))
 
 ;;; the ghost
 
@@ -243,6 +236,9 @@
 (define (on-mode-switch event)
    (clear!)
    (when (adapter.entered-insert? event)
+      (when config-problem
+         (adapter.status! config-problem)
+         (set! config-problem #f))
       (schedule!)))
 
 ;;; commands

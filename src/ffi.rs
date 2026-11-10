@@ -22,7 +22,7 @@ use steel::steel_vm::ffi::{FFIValue, FfiFuture, FfiFutureExt};
 use tokio::sync::watch;
 
 use crate::api::{Client, Request, Settings, Timing};
-use crate::{RUNTIME, clean, guarded, log};
+use crate::{RUNTIME, clean, config, guarded, log};
 
 struct Entry {
    text: Arc<tokio::sync::Mutex<watch::Receiver<(usize, String)>>>,
@@ -86,7 +86,7 @@ pub fn start(
       };
       let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
       let (sender, receiver) = watch::channel((0, String::new()));
-      let settings = Settings::default();
+      let settings = config::config().request.clone();
       let mut trace = Trace::new(id, &prefix, &suffix, &settings);
       let request = Request {
          prefix,
@@ -171,12 +171,22 @@ pub fn accepted(chars: usize) -> Result<bool, String> {
    })
 }
 
-/// `(hiss-log! on)`: turns the log on or off.
-pub fn set_log(on: bool) -> Result<bool, String> {
-   guarded("hiss-log!", || {
-      log::set_on(on);
-      on
+/// `(hiss-config name)`: a setting `hiss.scm` needs itself, from
+/// `config.toml`: `"enabled"` (a boolean) or `"debounce"` (milliseconds).
+/// Any other name gives `#f`.
+pub fn config_value(name: String) -> FFIValue {
+   let config = config::config();
+   guarded("hiss-config", || match name.as_str() {
+      "enabled" => FFIValue::BoolV(config.enabled),
+      "debounce" => FFIValue::IntV(config.debounce as isize),
+      _ => FFIValue::BoolV(false),
    })
+   .unwrap_or(FFIValue::BoolV(false))
+}
+
+/// `(hiss-config-problem)`: what was wrong with `config.toml`, or `#f`.
+pub fn config_problem() -> Result<Option<String>, String> {
+   guarded("hiss-config-problem", || config::CONFIG.1.clone())
 }
 
 /// What the log gets about one request: sizes and times, never text. A
