@@ -45,12 +45,19 @@ fn without_code_spans(line: &str) -> String {
       .join(" ")
 }
 
+/// Chars that prose outside code spans does without.
+const CODE: [char; 11] = ['{', '}', '(', ')', '[', ']', '=', '<', '>', ';', '|'];
+
 /// Text that opens like a sentence: a capitalised word, then two lowercase
-/// words ("The cursor sits", "Nothing to insert", "The `if` block").
+/// words ("The cursor sits", "Nothing to insert", "The `if` block"), and no
+/// code punctuation on the line so far. Haskell and ML patterns open the
+/// same way (`Cons x xs >>= f = ...`, `Just x -> ...`) until their operator
+/// arrives.
 fn opens_sentence(text: &str) -> bool {
    let line = without_code_spans(text.split('\n').next().unwrap_or(""));
    let tokens: Vec<&str> = line.split_whitespace().take(3).collect();
-   matches!(tokens[..], [a, b, c] if is_opening_word(a) && is_lower_word(b) && is_lower_word(c))
+   !line.contains(CODE)
+      && matches!(tokens[..], [a, b, c] if is_opening_word(a) && is_lower_word(b) && is_lower_word(c))
 }
 
 /// A whole line that reads as a sentence: not a comment or a string, five
@@ -66,7 +73,7 @@ fn is_sentence(line: &str) -> bool {
    let words = tokens.iter().filter(|t| is_word(t)).count();
    tokens.len() >= 5
       && words * 5 >= tokens.len() * 4
-      && !plain.contains(['{', '}', '(', ')', '[', ']', '=', '<', '>', ';'])
+      && !plain.contains(CODE)
       && trimmed.chars().next().is_some_and(char::is_uppercase)
       && (trimmed.ends_with(['.', ':']) || tokens.len() >= 8)
 }
@@ -111,13 +118,14 @@ fn may_open_sentence(text: &str) -> bool {
 }
 
 /// Where the text still being written may turn out to be prose, as a byte
-/// offset: its last line (which is not complete yet), or words glued to
-/// closing code on it.
+/// offset: its last line (which is not complete yet) while it opens or may
+/// open like a sentence, or words glued to closing code on it.
 pub fn pending(text: &str) -> Option<usize> {
    let start = text.rfind('\n').map_or(0, |at| at + 1);
    let line = &text[start..];
    let indent = line.len() - line.trim_start().len();
-   if !in_docstring(&text[..start]) && may_open_sentence(&line[indent..]) {
+   let words = &line[indent..];
+   if !in_docstring(&text[..start]) && (may_open_sentence(words) || opens_sentence(words)) {
       return Some(start);
    }
    line.char_indices().find_map(|(i, c)| {
@@ -152,10 +160,13 @@ fn is_placeholder(text: &str) -> bool {
 
 /// Where prose starts in `text`, as a byte offset, if it does:
 /// - a sentence glued to closing code (`}The mean ...`);
-/// - a line that opens like a sentence (`The cursor sits ...`), which counts
-///   as soon as its first three words are in;
-/// - a whole line that reads as a sentence, once the line is complete, or
-///   at once when `complete` says the whole reply is in.
+/// - a line that opens like a sentence (`The cursor sits ...`);
+/// - a whole line that reads as a sentence.
+///
+/// The last two count once the line is complete, or at once when `complete`
+/// says the whole reply is in; until then `pending` holds the line back. A
+/// line still streaming that opens like a sentence counts at five words,
+/// which no pattern reaches without an operator.
 pub fn prose(text: &str, complete: bool) -> Option<usize> {
    let glued = text.char_indices().find_map(|(i, c)| {
       let after = i + c.len_utf8();
@@ -175,13 +186,15 @@ pub fn prose(text: &str, complete: bool) -> Option<usize> {
       })
       .filter(|&(at, _)| !in_docstring(&text[..at]))
       .collect();
+   let done = |&&(at, line): &&(usize, &str)| complete || at + line.len() < text.len();
    let opening = lines
       .iter()
+      .filter(|line| done(line) || line.1.split_whitespace().count() >= 5)
       .find(|(_, line)| opens_sentence(line.trim_start()))
       .map(|&(at, _)| at);
    let whole = lines
       .iter()
-      .filter(|&&(at, line)| complete || at + line.len() < text.len())
+      .filter(done)
       .find(|(_, line)| is_sentence(line))
       .map(|&(at, _)| at);
    let placeholder = is_placeholder(text).then_some(0);
@@ -266,7 +279,9 @@ mod tests {
       assert_eq!(pending("Some(x"), None);
       assert_eq!(pending("let a"), None);
       assert_eq!(pending("SELECT name"), None);
-      assert_eq!(pending("The cursor sits"), None);
+      assert_eq!(pending("The cursor sits"), Some(0));
+      assert_eq!(pending("x\nCons x xs"), Some(2));
+      assert_eq!(pending("x\nCons x xs >>= f"), None);
       assert_eq!(pending("let a = 1;\n"), None);
    }
 
@@ -319,9 +334,26 @@ mod tests {
          "The `if` block is closed early.",
          "x += 1\n   The rest of the method",
       ] {
-         assert!(prose(reply, false).is_some(), "{reply}");
+         assert!(prose(reply, true).is_some(), "{reply}");
+         assert!(prose(&format!("{reply}\n"), false).is_some(), "{reply}");
       }
-      assert_eq!(prose("x += 1\n   The rest of", false), Some(7));
+      assert_eq!(prose("x += 1\n   The rest of", false), None);
+      assert_eq!(pending("x += 1\n   The rest of"), Some(7));
+   }
+
+   #[test]
+   fn constructor_patterns_are_not_prose() {
+      for code in [
+         "Nil >>= _ = Nil
+Cons x xs >>= f = append (f x) (xs >>= f)",
+         "case m of
+   Just x -> x
+   Nothing -> d",
+         "Left err -> throw err
+",
+      ] {
+         assert_eq!(prose(code, true), None, "{code}");
+      }
    }
 
    #[test]
