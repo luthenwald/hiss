@@ -13,11 +13,6 @@ const MESSAGES: &str = "https://api.anthropic.com/v1/messages";
 const MODELS: &str = "https://api.anthropic.com/v1/models?limit=1";
 const VERSION: &str = "2023-06-01";
 
-/// Where a completion ends. The API refuses whitespace-only stop sequences,
-/// so libhiss stops here itself and drops the stream, which resets it on the
-/// server too.
-const BLANK_LINE: &str = "\n\n";
-
 /// The instructions. One sentence on purpose: a fuller prompt, with rules
 /// or with worked examples, made the model explain ordinary code instead of
 /// completing it (`just quality`, 2026-11-09). Broken files are left to the
@@ -274,6 +269,7 @@ impl Client {
 
       let mut parser = sse::Parser::default();
       let mut decoder = sse::Decoder::default();
+      let mut wire = String::new();
       let mut raw = String::new();
       let mut shown = String::new();
       let mut shown_back = 0;
@@ -292,8 +288,12 @@ impl Client {
          for event in parser.push(&chunk) {
             match decoder.decode(&event) {
                Some(Message::Text(piece)) => {
-                  raw.push_str(&piece);
-                  let blank_line = raw.find(BLANK_LINE);
+                  // A blank line ends the completion. The API refuses
+                  // whitespace-only stop sequences, so libhiss stops there
+                  // itself and drops the stream, which ends it on the server.
+                  wire.push_str(&piece);
+                  raw = clean::unescape(&wire, shape).unwrap_or_else(|| wire.clone());
+                  let blank_line = clean::blank_line(&raw);
                   if let Some(at) = blank_line {
                      raw.truncate(at);
                   }

@@ -144,6 +144,28 @@ fn clean_as(raw: &str, shape: &Shape, complete: bool) -> Cleaned {
    Cleaned { text, prose, back }
 }
 
+/// Where the reply reaches a blank line, which ends it: a line break, then a
+/// line with nothing on it but spaces or tabs, then another break.
+pub fn blank_line(text: &str) -> Option<usize> {
+   text.match_indices('\n').map(|(at, _)| at).find(|&at| {
+      text[at + 1..]
+         .trim_start_matches([' ', '\t'])
+         .starts_with('\n')
+   })
+}
+
+/// A reply that writes its line breaks as `\n` escapes, all on one line
+/// (`\n\ninstance Monad List where\n ...`), with the breaks put back. Only
+/// one that starts with two escapes and has no real break, outside strings
+/// and comments, since `\n` is code as well (a Haskell lambda, a string).
+pub fn unescape(text: &str, shape: &Shape) -> Option<String> {
+   let escaped = shape.prose_guard
+      && text.starts_with("\\n")
+      && text.matches("\\n").count() >= 2
+      && !text.contains('\n');
+   escaped.then(|| text.replace("\\n", "\n"))
+}
+
 /// A reply that wraps the word and the rest in backticks, as inline code,
 /// loses them. Only right before the word, since a reply may well start with
 /// a backtick of its own (Haskell's `div`).
@@ -639,6 +661,28 @@ mod tests {
          super::clean_end("   let bb = 2;", &shape).text,
          "   let bb = 2;"
       );
+   }
+
+   #[test]
+   fn a_line_of_spaces_is_a_blank_line() {
+      assert_eq!(blank_line("a\n\nb"), Some(1));
+      assert_eq!(blank_line("\n   \n   instance"), Some(0));
+      assert_eq!(blank_line("a\n   b\n\t\nc"), Some(6));
+      assert_eq!(blank_line("a\n   "), None);
+   }
+
+   #[test]
+   fn escaped_line_breaks_are_put_back() {
+      let shape = Shape::new("f = g ys)", "\n", "haskell");
+      let raw = "\\n\\ninstance Monad List where\\n   Nil >>= _ = Nil";
+      assert_eq!(
+         unescape(raw, &shape).as_deref(),
+         Some("\n\ninstance Monad List where\n   Nil >>= _ = Nil")
+      );
+      assert_eq!(unescape("\\n -> n + 1", &shape), None);
+      assert_eq!(unescape("\\n\\n\nx", &shape), None);
+      let string = Shape::new("s = \"a", "\n", "haskell");
+      assert_eq!(unescape("\\n\\nb\"", &string), None);
    }
 
    #[test]
