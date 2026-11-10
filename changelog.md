@@ -9,4 +9,4 @@
 - New: settings in `~/.config/hiss/config.toml`: whether hiss starts on, how long it waits after an edit before asking (250 ms), the log, retries, the model, the reply length and how much of the file is sent.
 - New: after an API or network error that may pass, hiss asks once more by itself; `retries` and `prose_retries` set how often.
 - New: hiss keeps a log of how long each suggestion took in `~/.local/state/hiss/hiss.log`, with times and sizes only; `log = false` turns it off.
-- New: the readme explains how to install and uninstall hiss, and lists every file it creates.
+- New: `./install.sh` builds hiss and puts it where Steel looks for it, and `./install.sh --uninstall` removes it again.
