@@ -29,3 +29,5 @@ To load it, add this to `~/.config/helix/init.scm`:
 ```
 
 hiss starts on. `:hiss-toggle`, `:hiss-on` and `:hiss-off` switch it, and `:hiss-clear` removes the suggestion. When you type what the suggestion shows, it shortens as you go. hiss waits 150 ms after your last edit before it asks; `(hiss-configure #:debounce 250)` in `init.scm` changes that.
+
+hiss writes one line per request to `~/.local/state/hiss/hiss.log` (or under `$XDG_STATE_HOME`): how long the answer took, how many tokens it used, whether it was shown, cancelled or taken, and how much context was sent. The log never holds your code, file names or key. `(hiss-configure #:log #f)` turns it off.

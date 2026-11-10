@@ -15,13 +15,14 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use abi_stable::std_types::{RBoxError, RResult};
 use steel::steel_vm::ffi::{FFIValue, FfiFuture, FfiFutureExt};
 use tokio::sync::watch;
 
-use crate::api::{Client, Request, Settings};
-use crate::{RUNTIME, guarded};
+use crate::api::{Client, Request, Settings, Timing};
+use crate::{RUNTIME, clean, guarded, log};
 
 struct Entry {
    text: Arc<tokio::sync::Mutex<watch::Receiver<String>>>,
@@ -55,8 +56,12 @@ pub fn warm_up() {
       if let Ok(client) = CLIENT.as_ref() {
          let client = Arc::clone(client);
          RUNTIME.spawn(async move {
-            if let Err(error) = client.warm().await {
-               with_last(|last| last.error = Some(error));
+            match client.warm().await {
+               Ok(took) => log::write(&format!("warm after={}", took.as_millis())),
+               Err(error) => {
+                  log::write(&format!("warm error {}", log::word(&error)));
+                  with_last(|last| last.error = Some(error));
+               }
             }
          });
       }
@@ -81,6 +86,8 @@ pub fn start(
       };
       let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
       let (sender, receiver) = watch::channel(String::new());
+      let settings = Settings::default();
+      let mut trace = Trace::new(id, &prefix, &suffix, &settings);
       let request = Request {
          prefix,
          suffix,
@@ -88,11 +95,16 @@ pub fn start(
          path,
       };
       let task = RUNTIME.spawn(async move {
+         let start = trace.start;
          let result = client
-            .complete(&request, &Settings::default(), |text| {
+            .complete(&request, &settings, |text| {
+               if !text.is_empty() {
+                  trace.first_text.get_or_insert_with(|| start.elapsed());
+               }
                sender.send_replace(text.to_string());
             })
             .await;
+         trace.finish(&result);
          with_last(|last| match result {
             Ok(timing) => last.timing = Some(timing.to_string()),
             Err(error) => last.error = Some(error),
@@ -139,6 +151,83 @@ pub fn cancel(id: usize) -> Result<bool, String> {
          .map(|entry| entry.task.abort())
          .is_some()
    })
+}
+
+/// `(hiss-accepted! chars)`: notes in the log that a ghost was taken.
+pub fn accepted(chars: usize) -> Result<bool, String> {
+   guarded("hiss-accepted!", || {
+      log::write(&format!("accept chars={chars}"));
+      true
+   })
+}
+
+/// `(hiss-log! on)`: turns the log on or off.
+pub fn set_log(on: bool) -> Result<bool, String> {
+   guarded("hiss-log!", || {
+      log::set_on(on);
+      on
+   })
+}
+
+/// What the log gets about one request: sizes and times, never text. A
+/// trace dropped before `finish` belongs to a request that was cancelled,
+/// either by the editor or by a newer request.
+struct Trace {
+   id: usize,
+   start: Instant,
+   /// The chars of context sent before and after the cursor.
+   context: (usize, usize),
+   first_text: Option<Duration>,
+   done: bool,
+}
+
+impl Trace {
+   fn new(id: usize, prefix: &str, suffix: &str, settings: &Settings) -> Trace {
+      let chars = |text: &str| text.chars().count();
+      Trace {
+         id,
+         start: Instant::now(),
+         context: (
+            chars(clean::tail_lines(prefix, settings.prefix_chars)),
+            chars(clean::head_lines(suffix, settings.suffix_chars)),
+         ),
+         first_text: None,
+         done: false,
+      }
+   }
+
+   fn finish(&mut self, result: &Result<Timing, String>) {
+      self.done = true;
+      let (before, after) = self.context;
+      log::write(&match result {
+         Ok(timing) => format!(
+            "#{} {} {} ctx={before}+{after}",
+            self.id,
+            if timing.chars > 0 { "done" } else { "empty" },
+            log::timing_fields(timing),
+         ),
+         Err(error) => format!(
+            "#{} error after={} ctx={before}+{after} {}",
+            self.id,
+            self.start.elapsed().as_millis(),
+            log::word(error),
+         ),
+      });
+   }
+}
+
+impl Drop for Trace {
+   fn drop(&mut self) {
+      if !self.done {
+         let (before, after) = self.context;
+         log::write(&format!(
+            "#{} cancelled after={} ttft={} ctx={before}+{after}",
+            self.id,
+            self.start.elapsed().as_millis(),
+            log::ms_or_dash(self.first_text),
+         ));
+      }
+   }
 }
 
 /// `(hiss-error)`: the last error, once, or `#f`.

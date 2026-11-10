@@ -13,6 +13,7 @@
 pub mod api;
 pub mod clean;
 mod ffi;
+mod log;
 pub mod quality;
 pub mod sse;
 
@@ -50,6 +51,8 @@ fn create_module() -> FFIModule {
       .register_fn("hiss-start!", ffi::start)
       .register_fn("hiss-next", ffi::next)
       .register_fn("hiss-cancel!", ffi::cancel)
+      .register_fn("hiss-accepted!", ffi::accepted)
+      .register_fn("hiss-log!", ffi::set_log)
       .register_fn("hiss-error", ffi::error)
       .register_fn("hiss-timing", ffi::timing);
    module

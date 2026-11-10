@@ -15,7 +15,8 @@
 (require-builtin helix/core/text as text.)
 
 (#%require-dylib "libhiss"
-   (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-error hiss-timing)))
+   (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-error hiss-timing
+                               hiss-accepted! hiss-log!)))
 
 (provide hiss-configure
          hiss-on
@@ -82,13 +83,17 @@
 
 (define enabled #t)
 (define debounce-ms 150)
+(define log-on #t)
 
 ;;@doc
 ;; Change hiss's settings from init.scm, for example
 ;; (hiss-configure #:debounce 200). Settings left out keep their value.
 ;;   #:debounce  milliseconds to wait after an edit before asking (150)
-(define (hiss-configure #:debounce [debounce debounce-ms])
+;;   #:log       write timings and sizes to ~/.local/state/hiss/hiss.log (#t)
+(define (hiss-configure #:debounce [debounce debounce-ms] #:log [log log-on])
    (set! debounce-ms debounce)
+   (set! log-on log)
+   (native.hiss-log! log)
    void)
 
 ;;; the ghost
@@ -247,7 +252,8 @@
    (if ghost-text
        (let ([text ghost-text])
           (clear!)
-          (adapter.insert! text))
+          (adapter.insert! text)
+          (native.hiss-accepted! (string-length text)))
        (begin
           (clear!)
           (adapter.tab!)))
