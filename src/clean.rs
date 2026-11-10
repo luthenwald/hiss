@@ -127,6 +127,7 @@ fn clean_as(raw: &str, shape: &Shape, complete: bool) -> Cleaned {
       Typed::Lead(lead) => split_lead(text, lead),
       _ => (0, text),
    };
+   let text = align(&text, shape, back);
    Cleaned { text, prose, back }
 }
 
@@ -240,6 +241,108 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
       }
    }
    lines.join("\n")
+}
+
+/// The words of a line outside brackets, after its indentation, as
+/// (column, word, preceded by two spaces or more). Tabs inside a line make
+/// columns uncertain, so such a line gives nothing.
+fn words(line: &str) -> Vec<(usize, &str, bool)> {
+   let lead = leading(line).len();
+   if line[lead..].contains('\t') {
+      return Vec::new();
+   }
+   let mut found = Vec::new();
+   let (mut depth, mut gap, mut column) = (0i32, 0usize, 0usize);
+   let mut start = None;
+   for (i, c) in line.char_indices() {
+      if c == ' ' {
+         if let Some(s) = start.take() {
+            found.push(s);
+         }
+         gap += 1;
+      } else {
+         if start.is_none() {
+            let word_end = line[i..].find(' ').map_or(line.len(), |e| i + e);
+            if i >= lead && depth == 0 {
+               start = Some((column, &line[i..word_end], gap >= 2 && i > lead));
+            } else {
+               start = Some((column, "", false));
+            }
+         }
+         gap = 0;
+         depth += match c {
+            '(' | '[' | '{' => 1,
+            ')' | ']' | '}' => -1,
+            _ => 0,
+         };
+      }
+      column += 1;
+   }
+   found.extend(start);
+   found.retain(|(_, word, _)| !word.is_empty());
+   found
+}
+
+/// Lines up the reply with the lines above it: where those lines put a word
+/// at a column after a run of spaces (`(>>=)  :: m a     -> m b`), the same
+/// word in a reply line at the same depth is moved right to that column.
+/// Only spaces are added, only outside brackets, and the words keep their
+/// order. Nothing changes when the lines above show no such run.
+fn align(text: &str, shape: &Shape, back: usize) -> String {
+   let prefix_lines: Vec<&str> = shape.prefix.split('\n').collect();
+   let (above, cursor_line) = prefix_lines.split_at(prefix_lines.len() - 1);
+   let cursor_line = cursor_line[0];
+   let kept = cursor_line.chars().count().saturating_sub(back);
+   let start: String = cursor_line.chars().take(kept).collect();
+   let mut done: Vec<String> = Vec::new();
+   for (i, piece) in text.split('\n').enumerate() {
+      let head = if i == 0 { start.as_str() } else { "" };
+      let line = format!("{head}{piece}");
+      let depth = leading(&line).len();
+      let block = done
+         .iter()
+         .rev()
+         .map(String::as_str)
+         .chain(above.iter().rev().copied())
+         .take_while(|l| !l.trim().is_empty() && leading(l).len() == depth);
+      let marks: Vec<(usize, String)> = block
+         .flat_map(|l| {
+            words(l)
+               .into_iter()
+               .filter(|&(_, _, run)| run)
+               .map(|(col, word, _)| (col, word.to_string()))
+               .collect::<Vec<_>>()
+         })
+         .collect();
+      let aligned = if marks.is_empty() {
+         line
+      } else {
+         let head_len = head.chars().count();
+         let mut out = line.clone();
+         let (mut shift, mut last) = (0usize, 0usize);
+         for (col, word, _) in words(&line).into_iter().skip(1) {
+            let at = col + shift;
+            let target = marks
+               .iter()
+               .filter(|(k, w)| w == word && *k >= at && *k > last)
+               .map(|(k, _)| *k)
+               .min();
+            if let Some(k) = target {
+               if k > at && at >= head_len {
+                  let byte = out.char_indices().nth(at).map_or(out.len(), |(b, _)| b);
+                  out.insert_str(byte, &" ".repeat(k - at));
+                  shift += k - at;
+               }
+               last = k;
+            }
+         }
+         out
+      };
+      done.push(aligned);
+   }
+   let mut joined = done.join("\n");
+   joined.drain(..start.len());
+   joined
 }
 
 /// Drops a code fence the model added anyway. A reply that opens with a fence
@@ -481,6 +584,25 @@ mod tests {
       assert_eq!(
          super::clean("instance Functor Maybe where", &shape).text,
          " Functor Maybe where"
+      );
+   }
+
+   #[test]
+   fn a_reply_lines_up_with_the_lines_above() {
+      let class = "class Monad m where\n   (>>=)  :: m a     -> (a -> m b) -> m b\n   (>>)   :: m a     -> m b        -> m b\n";
+      let shape = Shape::new(class, "", "haskell");
+      assert_eq!(
+         super::clean_end("   return :: a -> m a\n   join :: m (m a) -> m a", &shape).text,
+         "   return :: a       -> m a\n   join   :: m (m a) -> m a"
+      );
+      let mid = format!("{class}   join :: m (m a) ");
+      let shape = Shape::new(&mid, "", "haskell");
+      assert_eq!(super::clean_end("-> m a", &shape).text, "  -> m a");
+      let plain = "fn f() {\n   let a = 1;\n";
+      let shape = Shape::new(plain, "", "rust");
+      assert_eq!(
+         super::clean_end("   let bb = 2;", &shape).text,
+         "   let bb = 2;"
       );
    }
 
