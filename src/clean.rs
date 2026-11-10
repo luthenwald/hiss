@@ -8,31 +8,77 @@ const FENCE: &str = "```";
 /// What the cleaning needs to know about a request, worked out once.
 #[derive(Debug, Clone)]
 pub struct Shape<'a> {
+   /// The text before the cursor, as the user has it.
+   pub prefix: &'a str,
    pub suffix: &'a str,
    pub indent: Indent,
    /// Whether prose is cut: not in prose files, comments or strings.
    pub prose_guard: bool,
+   /// What the request left out before the cursor (`heal`).
+   pub typed: Typed,
 }
 
 impl<'a> Shape<'a> {
-   pub fn new(prefix: &str, suffix: &'a str, language: &str) -> Shape<'a> {
+   pub fn new(prefix: &'a str, suffix: &'a str, language: &str) -> Shape<'a> {
       Shape {
+         prefix,
          suffix,
          indent: Indent {
             aligned: ALIGNED.contains(&language),
             ..indent_of(prefix)
          },
          prose_guard: quality::prose_applies(prefix, language),
+         typed: heal(prefix, language).1,
       }
    }
 }
 
-/// The reply as it may be shown, and whether prose was cut from it, which
-/// ends the stream.
+/// The text just before the cursor that the request leaves out, so that the
+/// model writes it whole. A model that sees half a word often gets the joint
+/// wrong (`impo` then `ort`, or `instance` then `Functor` with no space), and
+/// one that sees stray spaces on an empty line writes its line after them,
+/// even where it belongs further left.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typed {
+   /// The cursor follows a space or punctuation: nothing is left out.
+   Nothing,
+   /// The cursor ends a word, which every reply must start with.
+   Word(String),
+   /// Only whitespace sits before the cursor on its line (maybe none). The
+   /// reply brings its own indentation, which decides where it is drawn.
+   Lead(String),
+}
+
+/// Splits the text before the cursor into what the request sends and what it
+/// leaves out.
+pub fn heal<'p>(prefix: &'p str, language: &str) -> (&'p str, Typed) {
+   let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
+   let line = &prefix[line_start..];
+   if line.trim().is_empty() {
+      return (&prefix[..line_start], Typed::Lead(line.into()));
+   }
+   let lisp = ALIGNED.contains(&language);
+   let is_word = |c: char| c.is_alphanumeric() || c == '_' || (lisp && "-?!*<>=/".contains(c));
+   let start = prefix
+      .char_indices()
+      .rev()
+      .take_while(|&(_, c)| is_word(c))
+      .last()
+      .map_or(prefix.len(), |(i, _)| i);
+   match &prefix[start..] {
+      "" => (prefix, Typed::Nothing),
+      word => (&prefix[..start], Typed::Word(word.into())),
+   }
+}
+
+/// The reply as it may be shown, and whether prose was cut from it, which
+/// ends the stream. `back` counts the chars before the cursor that the ghost
+/// takes the place of: the reply's line starts that far left of the cursor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cleaned {
    pub text: String,
    pub prose: bool,
+   pub back: usize,
 }
 
 /// Cleans the reply so far for display (spec 04/08). It runs on the whole
@@ -50,6 +96,15 @@ pub fn clean_end(raw: &str, shape: &Shape) -> Cleaned {
 fn clean_as(raw: &str, shape: &Shape, complete: bool) -> Cleaned {
    let text = raw.replace(CURSOR, "");
    let text = strip_fence(&text);
+   // A reply that does not start with the word the cursor is in completes
+   // something else, and one that is still shorter has nothing to show yet.
+   let text = match &shape.typed {
+      Typed::Word(word) => match unquote(text, word).strip_prefix(word.as_str()) {
+         Some(rest) => rest,
+         None => return Cleaned::default(),
+      },
+      _ => text,
+   };
    let cut = shape
       .prose_guard
       .then(|| quality::prose(text, complete))
@@ -60,14 +115,49 @@ fn clean_as(raw: &str, shape: &Shape, complete: bool) -> Cleaned {
       .flatten();
    let text = held.map_or(text, |at| text[..at].trim_end());
    let text = &text[..text.len() - suffix_overlap(text, shape.suffix)];
-   Cleaned {
-      text: if text.trim().is_empty() {
-         String::new()
-      } else {
-         follow_indent(text, &shape.indent)
-      },
-      prose: cut.is_some(),
+   let prose = cut.is_some();
+   if text.trim().is_empty() {
+      return Cleaned {
+         prose,
+         ..Cleaned::default()
+      };
    }
+   let text = follow_indent(text, &shape.indent);
+   let (back, text) = match &shape.typed {
+      Typed::Lead(lead) => split_lead(text, lead),
+      _ => (0, text),
+   };
+   Cleaned { text, prose, back }
+}
+
+/// A reply that wraps the word and the rest in backticks, as inline code,
+/// loses them. Only right before the word, since a reply may well start with
+/// a backtick of its own (Haskell's `div`).
+fn unquote<'t>(text: &'t str, word: &str) -> &'t str {
+   match text.strip_prefix('`') {
+      Some(rest) if rest.starts_with(word) && !rest.starts_with('`') => {
+         rest.strip_suffix('`').unwrap_or(rest)
+      }
+      _ => text,
+   }
+}
+
+/// A reply at a line start carries its own indentation, and the cursor sits
+/// after `lead`. The part of the reply's indentation the line already has is
+/// dropped; when the reply starts further left, it is drawn from there, and
+/// `back` says how many chars of `lead` it replaces.
+fn split_lead(text: String, lead: &str) -> (usize, String) {
+   if let Some(rest) = text.strip_prefix(lead) {
+      return (0, rest.to_string());
+   }
+   let common: usize = text
+      .chars()
+      .zip(lead.chars())
+      .take_while(|(a, b)| a == b)
+      .map(|(a, _)| a.len_utf8())
+      .sum();
+   let back = lead[common..].chars().count();
+   (back, text[common..].to_string())
 }
 
 /// How many spaces a tab stands for when a tab file gets spaces.
@@ -77,13 +167,13 @@ const TAB_WIDTH: usize = 4;
 /// content (a line still streaming keeps its whitespace until text arrives):
 /// - at the start of a line, a reply that opens with blank lines loses them,
 ///   since they would leave the cursor's line empty and start lower;
-/// - a first line that repeats the indent the cursor already sits after loses
-///   it, since `insert_string` would put it in twice;
-/// - later lines use the file's unit, a tab standing for one unit;
+/// - lines use the file's unit, a tab standing for one unit;
 /// - in a file indented with spaces, when no line fits the file's width but
 ///   all fit another (4 in a 3-space file), the depth is rescaled.
 ///
-/// When the unit is unknown, only the first rule applies.
+/// The first line counts only at a line start, where the request left the
+/// line's whitespace out and the reply writes its indentation whole. When the
+/// unit is unknown, only the first rule applies.
 fn follow_indent(text: &str, indent: &Indent) -> String {
    let text = if indent.at_line_start {
       let blank = text.len() - text.trim_start().len();
@@ -95,14 +185,10 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
       text
    };
    let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
-   if indent.at_line_start && !indent.line.is_empty() {
-      if let Some(rest) = lines[0].strip_prefix(indent.line.as_str()) {
-         lines[0] = rest.to_string();
-      }
-   }
    let Some(unit) = indent.unit else {
       return lines.join("\n");
    };
+   let skip = usize::from(!indent.at_line_start);
    let tab = match unit {
       Unit::Tabs => TAB_WIDTH,
       Unit::Spaces(n) => n,
@@ -115,7 +201,7 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
    };
    let widths: Vec<usize> = lines
       .iter()
-      .skip(1)
+      .skip(skip)
       .filter(|line| !line.trim().is_empty())
       .map(|line| columns(leading(line)))
       .collect();
@@ -126,7 +212,7 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
          .map(|m| (n, m)),
       _ => None,
    };
-   for line in lines.iter_mut().skip(1) {
+   for line in lines.iter_mut().skip(skip) {
       if line.trim().is_empty() {
          continue;
       }
@@ -139,6 +225,18 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
       };
       if new_lead != lead {
          *line = format!("{new_lead}{}", &line[lead.len()..]);
+      }
+   }
+   // At a line start the model sometimes indents its first line by a width
+   // the file never uses (two spaces in a three-space file) while the rest
+   // keeps to the unit; that line moves to the nearest whole unit.
+   if let (true, Unit::Spaces(n), false) = (indent.at_line_start, unit, indent.aligned) {
+      let on_unit = |l: &String| l.trim().is_empty() || leading(l).len() % n == 0;
+      let first = &lines[0];
+      if !first.trim().is_empty() && !on_unit(first) && lines[1..].iter().all(on_unit) {
+         let width = leading(first).len();
+         let rounded = (width + n / 2) / n * n;
+         lines[0] = format!("{}{}", " ".repeat(rounded), &first[width..]);
       }
    }
    lines.join("\n")
@@ -328,24 +426,68 @@ mod tests {
       follow_indent(text, &indent)
    }
 
+   /// Cleans a reply at the end of `prefix` in a Rust file.
+   fn at(prefix: &str, raw: &str) -> Cleaned {
+      super::clean_end(raw, &Shape::new(prefix, "\n}\n", "rust"))
+   }
+
+   const BLOCK: &str = "fn f() {\n   if x {\n      y\n   }\n";
+
    #[test]
-   fn a_repeated_first_indent_is_dropped() {
+   fn the_lines_own_indent_is_split_from_the_reply() {
+      let prefix = format!("{BLOCK}      ");
+      let same = at(&prefix, "      let a = 1;");
+      assert_eq!((same.back, same.text.as_str()), (0, "let a = 1;"));
+      let left = at(&prefix, "   let a = 1;");
+      assert_eq!((left.back, left.text.as_str()), (3, "let a = 1;"));
+      let deeper = at(&format!("{BLOCK}   "), "      a\n   b");
+      assert_eq!((deeper.back, deeper.text.as_str()), (0, "   a\n   b"));
+      let top = at(&format!("{BLOCK}}}\n  "), "fn g() {}");
+      assert_eq!((top.back, top.text.as_str()), (2, "fn g() {}"));
+   }
+
+   #[test]
+   fn a_first_line_off_the_unit_takes_the_nearest_unit() {
+      let prefix = "class C a where\n   f :: a\n";
+      let shape = Shape::new(prefix, "", "haskell");
       assert_eq!(
-         follow("      let a = 1;", Unit::Spaces(3), "      "),
-         "let a = 1;"
+         super::clean_end("  g :: a\n   g = f", &shape).text,
+         "   g :: a\n   g = f"
       );
+      assert_eq!(super::clean_end(" g :: a", &shape).text, "g :: a");
+      assert_eq!(super::clean_end("  g\n     h", &shape).text, "  g\n     h");
+   }
+
+   #[test]
+   fn the_word_at_the_cursor_is_left_out_and_put_back() {
       assert_eq!(
-         follow("   let a = 1;", Unit::Spaces(3), "      "),
-         "   let a = 1;"
+         heal("x\nimpo", "haskell"),
+         ("x\n", Typed::Word("impo".into()))
+      );
+      assert_eq!(heal("x\n  ", "rust"), ("x\n", Typed::Lead("  ".into())));
+      assert_eq!(heal("x\n", "rust"), ("x\n", Typed::Lead("".into())));
+      assert_eq!(heal("f(a, ", "rust"), ("f(a, ", Typed::Nothing));
+      assert_eq!(
+         heal("(hiss-con", "scheme").1,
+         Typed::Word("hiss-con".into())
+      );
+      let shape = Shape::new("x = 1\nimpo", "", "haskell");
+      let clean = |raw| super::clean(raw, &shape).text;
+      assert_eq!(clean("import Prelude"), "rt Prelude");
+      assert_eq!(clean("imp"), "");
+      assert_eq!(clean("module X"), "");
+      assert_eq!(clean("`import Data.List`"), "rt Data.List");
+      let shape = Shape::new("x = 1\ninstance", "", "haskell");
+      assert_eq!(
+         super::clean("instance Functor Maybe where", &shape).text,
+         " Functor Maybe where"
       );
    }
 
    #[test]
    fn a_leading_line_break_at_a_line_start_is_dropped() {
-      assert_eq!(
-         follow("\n      let a = 1;\n      a", Unit::Spaces(3), "      "),
-         "let a = 1;\n      a"
-      );
+      let cleaned = at(&format!("{BLOCK}      "), "\n      let a = 1;\n      a");
+      assert_eq!(cleaned.text, "let a = 1;\n      a");
       assert_eq!(follow("\n   a", Unit::Spaces(3), "x {"), "\n   a");
       assert_eq!(
          follow("  \n\npub fn f()", Unit::Spaces(3), ""),

@@ -171,7 +171,7 @@ impl Client {
       &self,
       request: &Request,
       settings: &Settings,
-      mut on_text: impl FnMut(&str),
+      mut on_text: impl FnMut(&str, usize),
    ) -> Result<Timing, String> {
       let mut shape = clean::Shape::new(
          clean::tail_lines(&request.prefix, settings.prefix_chars),
@@ -203,7 +203,7 @@ impl Client {
       shape: &clean::Shape<'_>,
       start: Instant,
       timing: &mut Timing,
-      on_text: &mut impl FnMut(&str),
+      on_text: &mut impl FnMut(&str, usize),
    ) -> Result<Reply, String> {
       let mut response = self
          .post(MESSAGES)
@@ -230,14 +230,16 @@ impl Client {
       let mut decoder = sse::Decoder::default();
       let mut raw = String::new();
       let mut shown = String::new();
+      let mut shown_back = 0;
       let mut prose = false;
-      let mut show = |text: String, timing: &mut Timing, shown: &mut String| {
-         if text != *shown {
-            if !text.is_empty() {
+      let mut show = |cleaned: clean::Cleaned, timing: &mut Timing, shown: &mut String| {
+         if cleaned.text != *shown || cleaned.back != shown_back {
+            if !cleaned.text.is_empty() {
                timing.first_text.get_or_insert_with(|| start.elapsed());
             }
-            *shown = text;
-            on_text(shown);
+            *shown = cleaned.text;
+            shown_back = cleaned.back;
+            on_text(shown, shown_back);
          }
       };
       'stream: while let Some(chunk) = response.chunk().await.map_err(|e| format!("hiss: {e}"))? {
@@ -250,8 +252,9 @@ impl Client {
                      raw.truncate(at);
                   }
                   let cleaned = clean::clean(&raw, shape);
-                  show(cleaned.text, timing, &mut shown);
-                  if cleaned.prose {
+                  let cut = cleaned.prose;
+                  show(cleaned, timing, &mut shown);
+                  if cut {
                      prose = true;
                      timing.stop_reason = "prose".into();
                      break 'stream;
@@ -279,8 +282,9 @@ impl Client {
          }
       }
       let cleaned = clean::clean_end(&raw, shape);
-      show(cleaned.text, timing, &mut shown);
-      if cleaned.prose {
+      let cut = cleaned.prose;
+      show(cleaned, timing, &mut shown);
+      if cut {
          prose = true;
          timing.stop_reason = "prose".into();
       }
@@ -313,6 +317,18 @@ fn retry_body(first: &Value, prose: &str) -> Value {
    body
 }
 
+/// Tells the model which word the cursor is in, since the file it sees has
+/// that word left out (`clean::heal`). Measured on the word fixtures
+/// (2026-11-10): with the word left in and no note, 12/28 replies joined it
+/// wrongly (`impo` then `ort`, `instance` then `Functor`); shorter notes made
+/// the model write the word alone, or explain; asking to finish the line
+/// kept many replies to one line; this one, 28/28 over several lines.
+fn word_note(word: &str) -> String {
+   format!(
+      "The text at <CURSOR/> starts with `{word}`; write that word out in full, then complete the code."
+   )
+}
+
 /// The request body of spec 04/08. No sampling parameters and no prefill:
 /// both return a 400 on the 5.5 models. No stop sequence either (see
 /// `BLANK_LINE`).
@@ -325,8 +341,13 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
       .unit
       .map(|unit| format!(" indent=\"{unit}\""))
       .unwrap_or_default();
+   let (sent, typed) = clean::heal(prefix, &request.language);
+   let note = match typed {
+      clean::Typed::Word(word) => format!("\n{}", word_note(&word)),
+      _ => String::new(),
+   };
    let file = format!(
-      "<file path=\"{path}\" lang=\"{language}\"{indent}>\n{prefix}<CURSOR/>{suffix}\n</file>"
+      "<file path=\"{path}\" lang=\"{language}\"{indent}>\n{sent}<CURSOR/>{suffix}\n</file>{note}"
    );
    json!({
       "model": settings.model,

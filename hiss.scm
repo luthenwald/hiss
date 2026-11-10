@@ -67,6 +67,16 @@
 ;; Inserts `text` as it is at every cursor, with no auto-indent.
 (define (adapter.insert! text) (helix.static.insert_string text))
 
+;; Deletes from the cursor back to the line start, when only whitespace
+;; comes before it (helix-term/src/commands.rs, kill_to_line_start).
+(define (adapter.kill-to-line-start!) (helix.static.kill_to_line_start))
+
+;; The text from the start of the cursor's line up to `index`.
+(define (adapter.line-before index)
+   (let* ([rope (adapter.rope)]
+          [start (text.rope-line->char rope (text.rope-char->line rope index))])
+      (text.rope->string (text.rope->slice rope start index))))
+
 ;; What tab does without hiss.
 (define (adapter.tab!) (helix.static.smart_tab))
 
@@ -98,11 +108,16 @@
 
 ;;; the ghost
 
-;; What is showing: the text (or #f), the char index it was drawn at, and the
-;; document's length then, which tells a typed char from an auto-pair.
+;; What is showing: the text (or #f), the char index it was drawn at, the
+;; document's length then, which tells a typed char from an auto-pair, and
+;; how many chars before the cursor it replaces. A ghost whose line belongs
+;; further left than the cursor (two stray spaces on an empty line, the
+;; reply at column 0) is drawn from where it goes, so the spaces it replaces
+;; sit after it.
 (define ghost-text #f)
 (define ghost-index 0)
 (define ghost-length 0)
+(define ghost-back 0)
 
 ;; Helix moves inlay hints along with edits, and a hint goes after text
 ;; inserted at its own index (Assoc::After, helix-view/src/document.rs). So
@@ -122,11 +137,12 @@
             (adapter.remove-hint! cursor ghost-text))))
    (set! ghost-text #f))
 
-(define (ghost-show! index text)
+(define (ghost-show! index text back)
    (ghost-hide!)
    (set! ghost-index index)
    (set! ghost-length (adapter.length))
    (set! ghost-text text)
+   (set! ghost-back back)
    (adapter.add-hint! index text))
 
 ;;; requests
@@ -148,22 +164,27 @@
    (ghost-hide!))
 
 ;; Draws each piece of request `id`, minus what was typed through meanwhile.
-;; With `report`, the status line shows the timing at the end; errors always.
+;; A piece is `(back text)`: the text so far, and how many chars before the
+;; cursor it starts. With `report`, the status line shows the timing at the
+;; end; errors always.
 (define (follow! id gen report)
    (adapter.await (native.hiss-next id)
-      (lambda (text)
+      (lambda (piece)
          (when (= gen generation)
             (cond
-               [(not text)
+               [(not piece)
                 (set! request-id #f)
                 (let ([message (or (native.hiss-error)
                                    (and report (or (native.hiss-timing) "hiss: nothing")))])
                    (when message (adapter.status! message)))]
-               [(starts-with? text typed)
-                (let ([rest (substring text (string-length typed))])
+               [(and (> (car piece) 0) (equal? typed ""))
+                (ghost-show! (- origin (car piece)) (cadr piece) (car piece))
+                (follow! id gen report)]
+               [(and (= (car piece) 0) (starts-with? (cadr piece) typed))
+                (let ([rest (substring (cadr piece) (string-length typed))])
                    (if (equal? rest "")
                        (ghost-hide!)
-                       (ghost-show! (+ origin (string-length typed)) rest)))
+                       (ghost-show! (+ origin (string-length typed)) rest 0)))
                 (follow! id gen report)]
                [else (clear!)])))))
 
@@ -203,7 +224,7 @@
           (set! typed (string-append typed (string char)))
           (if (equal? rest "")
               (begin (clear!) (schedule!))
-              (ghost-show! (adapter.cursor) rest)))
+              (ghost-show! (adapter.cursor) rest 0)))
        (begin (clear!) (schedule!))))
 
 ;; Commands that edit text in insert mode ask again; any other command (a
@@ -250,8 +271,15 @@
 ;; Insert the ghost at the cursor. With no ghost showing, do what tab does.
 (define (hiss-accept)
    (if ghost-text
-       (let ([text ghost-text])
+       (let* ([text ghost-text]
+              [back ghost-back]
+              [lead (adapter.line-before (adapter.cursor))]
+              [kept (substring lead 0 (max 0 (- (string-length lead) back)))])
           (clear!)
+          (when (> back 0)
+             (adapter.kill-to-line-start!)
+             (unless (equal? kept "")
+                (adapter.insert! kept)))
           (adapter.insert! text)
           (native.hiss-accepted! (string-length text)))
        (begin
@@ -270,7 +298,7 @@
 ;; Draw a fixed three-line sample at the cursor.
 (define (hiss-test)
    (clear!)
-   (ghost-show! (adapter.cursor) "first line of the ghost\n   second line\n   third line")
+   (ghost-show! (adapter.cursor) "first line of the ghost\n   second line\n   third line" 0)
    void)
 
 ;;@doc

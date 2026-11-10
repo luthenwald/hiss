@@ -25,7 +25,7 @@ use crate::api::{Client, Request, Settings, Timing};
 use crate::{RUNTIME, clean, guarded, log};
 
 struct Entry {
-   text: Arc<tokio::sync::Mutex<watch::Receiver<String>>>,
+   text: Arc<tokio::sync::Mutex<watch::Receiver<(usize, String)>>>,
    task: tokio::task::AbortHandle,
 }
 
@@ -85,7 +85,7 @@ pub fn start(
          }
       };
       let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-      let (sender, receiver) = watch::channel(String::new());
+      let (sender, receiver) = watch::channel((0, String::new()));
       let settings = Settings::default();
       let mut trace = Trace::new(id, &prefix, &suffix, &settings);
       let request = Request {
@@ -97,11 +97,11 @@ pub fn start(
       let task = RUNTIME.spawn(async move {
          let start = trace.start;
          let result = client
-            .complete(&request, &settings, |text| {
+            .complete(&request, &settings, |text, back| {
                if !text.is_empty() {
                   trace.first_text.get_or_insert_with(|| start.elapsed());
                }
-               sender.send_replace(text.to_string());
+               sender.send_replace((back, text.to_string()));
             })
             .await;
          trace.finish(&result);
@@ -124,7 +124,8 @@ pub fn start(
    })
 }
 
-/// `(hiss-next id)`: a future of the ghost text so far, or of `#f` at the end.
+/// `(hiss-next id)`: a future of `(back text)`, the ghost text so far and how
+/// many chars before the cursor it starts, or of `#f` at the end.
 pub fn next(id: usize) -> FFIValue {
    let text = requests(|table| table.get(&id).map(|entry| Arc::clone(&entry.text)));
    let future = async move {
@@ -133,7 +134,16 @@ pub fn next(id: usize) -> FFIValue {
       };
       let mut receiver = text.lock().await;
       match receiver.changed().await {
-         Ok(()) => FFIValue::StringV(receiver.borrow_and_update().as_str().into()),
+         Ok(()) => {
+            let (back, text) = &*receiver.borrow_and_update();
+            FFIValue::Vector(
+               vec![
+                  FFIValue::IntV(*back as isize),
+                  FFIValue::StringV(text.as_str().into()),
+               ]
+               .into(),
+            )
+         }
          Err(_) => {
             requests(|table| table.remove(&id));
             FFIValue::BoolV(false)
@@ -266,12 +276,12 @@ mod tests {
    #[test]
    fn last_value_survives_a_closed_sender() {
       RUNTIME.block_on(async {
-         let (sender, mut receiver) = watch::channel(String::new());
-         sender.send_replace("a".into());
-         sender.send_replace("ab".into());
+         let (sender, mut receiver) = watch::channel((0, String::new()));
+         sender.send_replace((0, "a".into()));
+         sender.send_replace((2, "ab".into()));
          drop(sender);
          assert!(receiver.changed().await.is_ok());
-         assert_eq!(*receiver.borrow_and_update(), "ab");
+         assert_eq!(*receiver.borrow_and_update(), (2, "ab".into()));
          assert!(receiver.changed().await.is_err());
       });
    }

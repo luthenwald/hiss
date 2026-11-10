@@ -16,7 +16,7 @@ use std::time::Duration;
 use hiss::RUNTIME;
 use hiss::api::{Client, Request, Settings, Timing};
 use hiss::clean::Shape;
-use hiss::quality::{indent_problem, prose};
+use hiss::quality::{first_column_problem, indent_problem, prose};
 
 const CURSOR: &str = "<|>";
 
@@ -28,6 +28,7 @@ fn language(path: &str) -> &'static str {
       "go" => "go",
       "ts" => "typescript",
       "zig" => "zig",
+      "hs" => "haskell",
       "md" => "markdown",
       _ => "text",
    }
@@ -98,6 +99,7 @@ struct Tally {
    clean: usize,
    prose: usize,
    indent: usize,
+   joint: usize,
    empty: usize,
    cut: usize,
    retried: usize,
@@ -128,14 +130,24 @@ fn main() -> Result<(), String> {
             name: name.clone(),
             ..Tally::default()
          };
+         // What a clean reply must start with, for fixtures where the cursor
+         // splits or ends a word: `tests/expect/<fixture>`.
+         let expect = std::path::Path::new(path)
+            .parent()
+            .map(|dir| dir.join("../expect").join(&name))
+            .and_then(|file| std::fs::read_to_string(file).ok());
          let mut totals = Vec::new();
          if !options.check {
             println!("{path}");
          }
          for run in 1..=options.runs {
             let mut last = String::new();
+            let mut back = 0;
             let timing: Timing = client
-               .complete(&request, &settings, |text| last = text.to_string())
+               .complete(&request, &settings, |text, b| {
+                  last = text.to_string();
+                  back = b;
+               })
                .await?;
             tally.runs += 1;
             tally.ttfts.extend(timing.first_text);
@@ -159,9 +171,17 @@ fn main() -> Result<(), String> {
             } else if prose(&last, true).is_some() {
                tally.prose += 1;
                Some("prose")
-            } else if let Some(problem) = indent_problem(&last, &indent) {
+            } else if let Some(problem) =
+               indent_problem(&last, &indent).or(first_column_problem(&last, back, &indent))
+            {
                tally.indent += 1;
                Some(problem)
+            } else if expect
+               .as_ref()
+               .is_some_and(|start| !last.starts_with(start.as_str()))
+            {
+               tally.joint += 1;
+               Some("joint")
             } else {
                None
             };
@@ -171,7 +191,7 @@ fn main() -> Result<(), String> {
             if problem.is_some() || options.show {
                let verdict = problem.unwrap_or("clean");
                println!(
-                  "{name} run {run}: {verdict}, {}\n{}",
+                  "{name} run {run}: {verdict}, {}, back {back}\n{}",
                   timing.stop_reason,
                   rule()
                );
@@ -189,16 +209,17 @@ fn main() -> Result<(), String> {
       }
       if options.check {
          println!(
-            "\n{:<14} {:>7} {:>6} {:>7} {:>6} {:>4} {:>6} {:>9}",
-            "fixture", "clean", "prose", "indent", "empty", "cut", "retry", "ttft"
+            "\n{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
+            "fixture", "clean", "prose", "indent", "joint", "empty", "cut", "retry", "ttft"
          );
          for t in &tallies {
             println!(
-               "{:<14} {:>7} {:>6} {:>7} {:>6} {:>4} {:>6} {:>9}",
+               "{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
                t.name,
                format!("{}/{}", t.clean, t.runs),
                t.prose,
                t.indent,
+               t.joint,
                t.empty,
                t.cut,
                t.retried,
@@ -208,11 +229,12 @@ fn main() -> Result<(), String> {
          let sum = |f: fn(&Tally) -> usize| tallies.iter().map(f).sum::<usize>();
          let ttfts = tallies.iter().flat_map(|t| t.ttfts.clone()).collect();
          println!(
-            "{:<14} {:>7} {:>6} {:>7} {:>6} {:>4} {:>6} {:>9}",
+            "{:<14} {:>7} {:>6} {:>7} {:>6} {:>6} {:>4} {:>6} {:>9}",
             "all",
             format!("{}/{}", sum(|t| t.clean), sum(|t| t.runs)),
             sum(|t| t.prose),
             sum(|t| t.indent),
+            sum(|t| t.joint),
             sum(|t| t.empty),
             sum(|t| t.cut),
             sum(|t| t.retried),

@@ -214,9 +214,40 @@ pub fn indent_problem(text: &str, indent: &Indent) -> Option<&'static str> {
       })
 }
 
+/// Whether the reply's first line, drawn `back` chars left of the cursor at a
+/// line start, lands off the file's unit (two spaces in a three-space file).
+pub fn first_column_problem(text: &str, back: usize, indent: &Indent) -> Option<&'static str> {
+   let Some(Unit::Spaces(n)) = indent.unit else {
+      return None;
+   };
+   if !indent.at_line_start || indent.aligned || indent.line.contains('\t') {
+      return None;
+   }
+   let first = text.split('\n').next().unwrap_or("");
+   let own = first.len() - first.trim_start_matches(' ').len();
+   let column = indent.line.len().saturating_sub(back) + own;
+   (column % n != 0).then_some("first line off the unit")
+}
+
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn a_first_line_off_the_unit_is_seen() {
+      let indent = Indent {
+         unit: Some(Unit::Spaces(3)),
+         line: "  ".into(),
+         at_line_start: true,
+         aligned: false,
+      };
+      assert_eq!(
+         first_column_problem("x", 0, &indent),
+         Some("first line off the unit")
+      );
+      assert_eq!(first_column_problem("x", 2, &indent), None);
+      assert_eq!(first_column_problem(" x", 0, &indent), None);
+   }
 
    const USER_REPLY: &str = "let sum: f64 = self.values.iter().sum();\n      Some(sum / self.values.len() as f64)} else if false {}The mean method is broken around the cursor: the `if` block is closed before the `let sum` line, and there's a stray `} else if false {}` after the cursor. The completion should fix the body at the cursor position, closing the method properly.";
 
