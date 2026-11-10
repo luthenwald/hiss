@@ -44,8 +44,12 @@ pub enum Typed {
    Nothing,
    /// The cursor ends a word, which every reply must start with.
    Word(String),
-   /// Only whitespace sits before the cursor on its line (maybe none). The
-   /// reply brings its own indentation, which decides where it is drawn.
+   /// Only whitespace sits before the cursor on its line, and it is not a
+   /// whole number of the file's units (two stray spaces in a three-space
+   /// file). The reply brings its own indentation, which decides where it
+   /// is drawn. Whitespace that fits the unit is where Helix's auto-indent
+   /// put the cursor, and is kept: the model, shown a line start there,
+   /// often writes no indentation at all.
    Lead(String),
 }
 
@@ -55,7 +59,15 @@ pub fn heal<'p>(prefix: &'p str, language: &str) -> (&'p str, Typed) {
    let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
    let line = &prefix[line_start..];
    if line.trim().is_empty() {
-      return (&prefix[..line_start], Typed::Lead(line.into()));
+      let off_unit = match indent_of(prefix).unit {
+         Some(Unit::Spaces(n)) => line.contains('\t') || line.len() % n != 0,
+         Some(Unit::Tabs) => line.contains(' '),
+         None => false,
+      };
+      return match off_unit {
+         true => (&prefix[..line_start], Typed::Lead(line.into())),
+         false => (prefix, Typed::Nothing),
+      };
    }
    let lisp = ALIGNED.contains(&language);
    let is_word = |c: char| c.is_alphanumeric() || c == '_' || (lisp && "-?!*<>=/".contains(c));
@@ -122,7 +134,8 @@ fn clean_as(raw: &str, shape: &Shape, complete: bool) -> Cleaned {
          ..Cleaned::default()
       };
    }
-   let text = follow_indent(text, &shape.indent);
+   let healed = matches!(shape.typed, Typed::Lead(_));
+   let text = follow_indent(text, &shape.indent, healed);
    let (back, text) = match &shape.typed {
       Typed::Lead(lead) => split_lead(text, lead),
       _ => (0, text),
@@ -172,10 +185,12 @@ const TAB_WIDTH: usize = 4;
 /// - in a file indented with spaces, when no line fits the file's width but
 ///   all fit another (4 in a 3-space file), the depth is rescaled.
 ///
-/// The first line counts only at a line start, where the request left the
-/// line's whitespace out and the reply writes its indentation whole. When the
-/// unit is unknown, only the first rule applies.
-fn follow_indent(text: &str, indent: &Indent) -> String {
+/// The first line counts only when the request left the line's whitespace
+/// out (`healed`) and the reply writes its indentation whole. Otherwise, at a
+/// line start, a first line that repeats the indent the cursor already sits
+/// after loses it, since `insert_string` would put it in twice. When the unit
+/// is unknown, only the first rule and that one apply.
+fn follow_indent(text: &str, indent: &Indent, healed: bool) -> String {
    let text = if indent.at_line_start {
       let blank = text.len() - text.trim_start().len();
       match text[..blank].rfind('\n') {
@@ -186,10 +201,19 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
       text
    };
    let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
+   let base = match (indent.at_line_start, healed) {
+      (true, false) => indent.line.len(),
+      _ => 0,
+   };
+   if base > 0 {
+      if let Some(rest) = lines[0].strip_prefix(indent.line.as_str()) {
+         lines[0] = rest.to_string();
+      }
+   }
    let Some(unit) = indent.unit else {
       return lines.join("\n");
    };
-   let skip = usize::from(!indent.at_line_start);
+   let skip = usize::from(!healed);
    let tab = match unit {
       Unit::Tabs => TAB_WIDTH,
       Unit::Spaces(n) => n,
@@ -230,14 +254,21 @@ fn follow_indent(text: &str, indent: &Indent) -> String {
    }
    // At a line start the model sometimes indents its first line by a width
    // the file never uses (two spaces in a three-space file) while the rest
-   // keeps to the unit; that line moves to the nearest whole unit.
+   // keeps to the unit; that line moves to the nearest whole unit, counted
+   // from the line start, without going left of the cursor.
    if let (true, Unit::Spaces(n), false) = (indent.at_line_start, unit, indent.aligned) {
       let on_unit = |l: &String| l.trim().is_empty() || leading(l).len() % n == 0;
       let first = &lines[0];
-      if !first.trim().is_empty() && !on_unit(first) && lines[1..].iter().all(on_unit) {
-         let width = leading(first).len();
-         let rounded = (width + n / 2) / n * n;
-         lines[0] = format!("{}{}", " ".repeat(rounded), &first[width..]);
+      let width = leading(first).len();
+      let column = base + width;
+      if !first.trim().is_empty()
+         && column % n != 0
+         && !indent.line.contains('\t')
+         && !first[..width].contains('\t')
+         && lines[1..].iter().all(on_unit)
+      {
+         let rounded = ((column + n / 2) / n * n).max(base);
+         lines[0] = format!("{}{}", " ".repeat(rounded - base), &first[width..]);
       }
    }
    lines.join("\n")
@@ -526,7 +557,7 @@ mod tests {
          at_line_start: line.trim().is_empty(),
          aligned: false,
       };
-      follow_indent(text, &indent)
+      follow_indent(text, &indent, false)
    }
 
    /// Cleans a reply at the end of `prefix` in a Rust file.
@@ -541,8 +572,8 @@ mod tests {
       let prefix = format!("{BLOCK}      ");
       let same = at(&prefix, "      let a = 1;");
       assert_eq!((same.back, same.text.as_str()), (0, "let a = 1;"));
-      let left = at(&prefix, "   let a = 1;");
-      assert_eq!((left.back, left.text.as_str()), (3, "let a = 1;"));
+      let bare = at(&prefix, "let a = 1;\nb");
+      assert_eq!((bare.back, bare.text.as_str()), (0, "let a = 1;\nb"));
       let deeper = at(&format!("{BLOCK}   "), "      a\n   b");
       assert_eq!((deeper.back, deeper.text.as_str()), (0, "   a\n   b"));
       let top = at(&format!("{BLOCK}}}\n  "), "fn g() {}");
@@ -567,8 +598,12 @@ mod tests {
          heal("x\nimpo", "haskell"),
          ("x\n", Typed::Word("impo".into()))
       );
-      assert_eq!(heal("x\n  ", "rust"), ("x\n", Typed::Lead("  ".into())));
-      assert_eq!(heal("x\n", "rust"), ("x\n", Typed::Lead("".into())));
+      assert_eq!(
+         heal("a {\n   b\n  ", "rust"),
+         ("a {\n   b\n", Typed::Lead("  ".into()))
+      );
+      assert_eq!(heal("a {\n   b\n   ", "rust").1, Typed::Nothing);
+      assert_eq!(heal("x\n", "rust"), ("x\n", Typed::Nothing));
       assert_eq!(heal("f(a, ", "rust"), ("f(a, ", Typed::Nothing));
       assert_eq!(
          heal("(hiss-con", "scheme").1,
