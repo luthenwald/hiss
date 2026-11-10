@@ -4,7 +4,8 @@
 //! `hiss-next` returns a future of the whole cleaned ghost text so far, or of
 //! `#f` once the stream has ended, failed or been cancelled. `hiss-cancel!`
 //! aborts a request. Only one request runs at a time: starting one aborts the
-//! others, since only the newest can still be shown.
+//! others, since only the newest can still be shown. `hiss-cached` gives a
+//! suggestion already made for the same text, without asking.
 //!
 //! Futures handed to Steel are polled on Helix's runtime, so they only wait on
 //! channels, and each poll runs under `catch_unwind`.
@@ -22,6 +23,7 @@ use steel::steel_vm::ffi::{FFIValue, FfiFuture, FfiFutureExt};
 use tokio::sync::watch;
 
 use crate::api::{Client, Request, Settings, Timing};
+use crate::cache::{self, Cache, Ghost, Key};
 use crate::{RUNTIME, clean, config, guarded, log};
 
 struct Entry {
@@ -33,6 +35,35 @@ static CLIENT: LazyLock<Result<Arc<Client>, String>> =
    LazyLock::new(|| Client::from_env().map(Arc::new));
 static REQUESTS: LazyLock<Mutex<HashMap<usize, Entry>>> = LazyLock::new(Default::default);
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::new(cache::CAPACITY)));
+
+fn cached<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
+   f(&mut CACHE.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// The window a request sends: the text around the cursor, cut at lines.
+fn window<'a>(prefix: &'a str, suffix: &'a str, settings: &Settings) -> (&'a str, &'a str) {
+   (
+      clean::tail_lines(prefix, settings.prefix_chars),
+      clean::head_lines(suffix, settings.suffix_chars),
+   )
+}
+
+fn key(prefix: &str, suffix: &str, language: &str, path: &str, settings: &Settings) -> Key {
+   let (before, after) = window(prefix, suffix, settings);
+   Key::new(before, after, language, path)
+}
+
+/// A ghost as Steel sees it: `(back text)`.
+fn ghost_value((back, text): &Ghost) -> FFIValue {
+   FFIValue::Vector(
+      vec![
+         FFIValue::IntV(*back as isize),
+         FFIValue::StringV(text.as_str().into()),
+      ]
+      .into(),
+   )
+}
 
 /// The last error and the last timing, for the status line and the log.
 #[derive(Default)]
@@ -88,6 +119,7 @@ pub fn start(
       let (sender, receiver) = watch::channel((0, String::new()));
       let settings = config::config().request.clone();
       let mut trace = Trace::new(id, &prefix, &suffix, &settings);
+      let key = key(&prefix, &suffix, &language, &path, &settings);
       let request = Request {
          prefix,
          suffix,
@@ -96,15 +128,22 @@ pub fn start(
       };
       let task = RUNTIME.spawn(async move {
          let start = trace.start;
+         let mut last: Ghost = (0, String::new());
          let result = client
             .complete(&request, &settings, |text, back| {
                if !text.is_empty() {
                   trace.first_text.get_or_insert_with(|| start.elapsed());
                }
-               sender.send_replace((back, text.to_string()));
+               last = (back, text.to_string());
+               sender.send_replace(last.clone());
             })
             .await;
          trace.finish(&result);
+         // Only a finished suggestion is kept; an empty one is asked for
+         // again next time, since the model may answer then.
+         if result.is_ok() && !last.1.is_empty() {
+            cached(|cache| cache.put(key, last));
+         }
          with_last(|last| match result {
             Ok(timing) => last.timing = Some(timing.to_string()),
             Err(error) => last.error = Some(error),
@@ -134,16 +173,7 @@ pub fn next(id: usize) -> FFIValue {
       };
       let mut receiver = text.lock().await;
       match receiver.changed().await {
-         Ok(()) => {
-            let (back, text) = &*receiver.borrow_and_update();
-            FFIValue::Vector(
-               vec![
-                  FFIValue::IntV(*back as isize),
-                  FFIValue::StringV(text.as_str().into()),
-               ]
-               .into(),
-            )
-         }
+         Ok(()) => ghost_value(&receiver.borrow_and_update()),
          Err(_) => {
             requests(|table| table.remove(&id));
             FFIValue::BoolV(false)
@@ -152,6 +182,29 @@ pub fn next(id: usize) -> FFIValue {
    };
    let future: FfiFuture<RResult<FFIValue, RBoxError>> = Unwinding(Box::pin(future)).into_ffi();
    future.into()
+}
+
+/// `(hiss-cached prefix suffix language path)`: the suggestion a finished
+/// request made for the same text, as `(back text)`, or `#f`.
+pub fn cached_ghost(prefix: String, suffix: String, language: String, path: String) -> FFIValue {
+   guarded("hiss-cached", || {
+      let settings = &config::config().request;
+      let ghost = cached(|cache| cache.get(key(&prefix, &suffix, &language, &path, settings)));
+      match ghost {
+         Some(ghost) => {
+            let (before, after) = window(&prefix, &suffix, settings);
+            log::write(&format!(
+               "hit chars={} ctx={}+{}",
+               ghost.1.chars().count(),
+               before.chars().count(),
+               after.chars().count(),
+            ));
+            ghost_value(&ghost)
+         }
+         None => FFIValue::BoolV(false),
+      }
+   })
+   .unwrap_or(FFIValue::BoolV(false))
 }
 
 /// `(hiss-cancel! id)`: aborts the request; a pending `hiss-next` gives `#f`.
@@ -211,10 +264,10 @@ impl Trace {
       Trace {
          id,
          start: Instant::now(),
-         context: (
-            chars(clean::tail_lines(prefix, settings.prefix_chars)),
-            chars(clean::head_lines(suffix, settings.suffix_chars)),
-         ),
+         context: {
+            let (before, after) = window(prefix, suffix, settings);
+            (chars(before), chars(after))
+         },
          first_text: None,
          done: false,
       }

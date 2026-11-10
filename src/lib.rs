@@ -11,6 +11,7 @@
 //! libhiss's own runtime.
 
 pub mod api;
+pub mod cache;
 pub mod clean;
 pub mod config;
 mod ffi;
@@ -53,6 +54,7 @@ fn create_module() -> FFIModule {
       .register_fn("hiss-start!", ffi::start)
       .register_fn("hiss-next", ffi::next)
       .register_fn("hiss-cancel!", ffi::cancel)
+      .register_fn("hiss-cached", ffi::cached_ghost)
       .register_fn("hiss-accepted!", ffi::accepted)
       .register_fn("hiss-config", ffi::config_value)
       .register_fn("hiss-config-problem", ffi::config_problem)

@@ -36,7 +36,7 @@ Then set `theme = "base16_terminal_hiss"` in Helix's `config.toml`.
 
 ## Using it
 
-hiss starts on. `:hiss-toggle`, `:hiss-on` and `:hiss-off` switch it, and `:hiss-clear` removes the suggestion. When you type what the suggestion shows, it shortens as you go. `:hiss-try` asks right away and shows how long the answer took.
+hiss starts on. `:hiss-toggle`, `:hiss-on` and `:hiss-off` switch it, and `:hiss-clear` removes the suggestion. When you type what the suggestion shows, it shortens as you go. hiss remembers its last 64 suggestions while the editor runs, so when an undo or a retyped character brings back text it has seen, the suggestion returns at once without asking again. `:hiss-try` always asks right away and shows how long the answer took.
 
 ## Settings
 
@@ -56,7 +56,7 @@ Settings live in `~/.config/hiss/config.toml` (under `$XDG_CONFIG_HOME` when tha
 
 hiss reads the file when the editor starts. A line it cannot read keeps its default, and the status line says which line it was.
 
-hiss writes one line per request to `~/.local/state/hiss/hiss.log` (under `$XDG_STATE_HOME` when that is set): how long the answer took, how many tokens it used, whether it was shown, cancelled or taken, and how much context was sent. The log never holds your code, file names or key.
+hiss writes one line per request to `~/.local/state/hiss/hiss.log` (under `$XDG_STATE_HOME` when that is set): how long the answer took, how many tokens it used, whether it was shown, cancelled, taken or remembered, and how much context was sent. The log never holds your code, file names or key.
 
 ## Uninstalling
 

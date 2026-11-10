@@ -15,8 +15,8 @@
 (require-builtin helix/core/text as text.)
 
 (#%require-dylib "libhiss"
-   (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-error hiss-timing
-                               hiss-accepted! hiss-config hiss-config-problem)))
+   (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-cached hiss-error
+                               hiss-timing hiss-accepted! hiss-config hiss-config-problem)))
 
 (provide hiss-on
          hiss-off
@@ -146,6 +146,10 @@
 
 ;;; requests
 
+;; The text around the cursor at `index`, as libhiss wants it.
+(define (context-at index)
+   (adapter.text-around index context-before context-after))
+
 ;; The request whose pieces may still be drawn; a counter that makes stale
 ;; callbacks (older requests, older debounce timers) do nothing; the char
 ;; index the request was made at; and what has been typed through since.
@@ -191,7 +195,7 @@
 (define (request! report)
    (clear!)
    (let* ([index (adapter.cursor)]
-          [around (adapter.text-around index context-before context-after)]
+          [around (context-at index)]
           [id (native.hiss-start! (car around) (cadr around) (adapter.language) (adapter.path))])
       (if id
           (begin
@@ -200,14 +204,32 @@
              (follow! id generation report))
           (adapter.status! (or (native.hiss-error) "hiss: no request")))))
 
-;; Asks after the debounce, unless something happened in between.
+;; Draws the suggestion libhiss already made for the text around the
+;; cursor, if there is one, and says whether it did.
+(define (show-cached!)
+   (let* ([index (adapter.cursor)]
+          [around (context-at index)]
+          [hit (native.hiss-cached (car around) (cadr around) (adapter.language) (adapter.path))])
+      (when hit
+         (set! origin index)
+         (ghost-show! (- index (car hit)) (cadr hit) (car hit)))
+      (if hit #t #f)))
+
+;; Shows a suggestion made before for this very text (after an undo, or a
+;; deleted char typed again), or else asks after the debounce, unless
+;; something happened in between. The first step waits for the current
+;; command to finish its edit (`o` inserts its line after the mode switch).
 (define (schedule!)
    (when enabled
-      (let ([gen generation])
-         (adapter.after! debounce-ms
+      (let* ([gen generation]
+             [still? (lambda () (and enabled (= gen generation) (adapter.insert-mode?)))])
+         (adapter.after! 0
             (lambda ()
-               (when (and enabled (= gen generation) (adapter.insert-mode?))
-                  (request! #f)))))))
+               (when (and (still?) (not (show-cached!)))
+                  (adapter.after! debounce-ms
+                     (lambda ()
+                        (when (still?)
+                           (request! #f))))))))))
 
 ;;; typing
 
