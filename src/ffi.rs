@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -52,6 +53,21 @@ fn window<'a>(prefix: &'a str, suffix: &'a str, settings: &Settings) -> (&'a str
 fn key(prefix: &str, suffix: &str, language: &str, path: &str, settings: &Settings) -> Key {
    let (before, after) = window(prefix, suffix, settings);
    Key::new(before, after, language, path)
+}
+
+/// The path a request names: relative to the working directory (Helix's,
+/// usually the project) when the file is under it, else the file name alone,
+/// so that no home folder or user name leaves the machine.
+fn shown_path(path: &str, cwd: Option<&Path>) -> String {
+   let path = Path::new(path);
+   cwd.and_then(|cwd| path.strip_prefix(cwd).ok())
+      .filter(|relative| !relative.as_os_str().is_empty())
+      .or_else(|| path.file_name().map(Path::new))
+      .map_or(String::new(), |shown| shown.to_string_lossy().into_owned())
+}
+
+fn shown(path: &str) -> String {
+   shown_path(path, std::env::current_dir().ok().as_deref())
 }
 
 /// A ghost as Steel sees it: `(back text)`.
@@ -118,6 +134,7 @@ pub fn start(
       let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
       let (sender, receiver) = watch::channel((0, String::new()));
       let settings = config::config().request.clone();
+      let path = shown(&path);
       let mut trace = Trace::new(id, &prefix, &suffix, &settings);
       let key = key(&prefix, &suffix, &language, &path, &settings);
       let request = Request {
@@ -189,6 +206,7 @@ pub fn next(id: usize) -> FFIValue {
 pub fn cached_ghost(prefix: String, suffix: String, language: String, path: String) -> FFIValue {
    guarded("hiss-cached", || {
       let settings = &config::config().request;
+      let path = shown(&path);
       let ghost = cached(|cache| cache.get(key(&prefix, &suffix, &language, &path, settings)));
       match ghost {
          Some(ghost) => {
@@ -339,6 +357,21 @@ impl Future for Unwinding {
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn paths_are_shown_from_the_working_directory() {
+      let cwd = Some(Path::new("/home/someone/project"));
+      assert_eq!(
+         shown_path("/home/someone/project/src/a.rs", cwd),
+         "src/a.rs"
+      );
+      assert_eq!(shown_path("/home/someone/project/a.rs", cwd), "a.rs");
+      assert_eq!(shown_path("/home/someone/notes/b.md", cwd), "b.md");
+      assert_eq!(shown_path("/home/someone/notes/b.md", None), "b.md");
+      assert_eq!(shown_path("", cwd), "");
+      // A buffer named after the directory itself still shows a name.
+      assert_eq!(shown_path("/home/someone/project", cwd), "project");
+   }
 
    #[test]
    fn last_value_survives_a_closed_sender() {
