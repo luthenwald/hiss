@@ -35,10 +35,10 @@ static LINES: LazyLock<Option<Sender<String>>> = LazyLock::new(|| {
             if file.is_none() {
                file = open(&path).ok();
             }
-            if let Some(open) = file.as_mut() {
-               if open.write_all(line.as_bytes()).is_err() {
-                  file = None;
-               }
+            if let Some(open) = file.as_mut()
+               && open.write_all(line.as_bytes()).is_err()
+            {
+               file = None;
             }
          }
       })
@@ -53,10 +53,10 @@ pub fn set_on(on: bool) {
 
 /// Appends `event` with a time stamp, unless the log is off.
 pub fn write(event: &str) {
-   if ON.load(Ordering::Relaxed) {
-      if let Some(sender) = LINES.as_ref() {
-         let _ = sender.send(format!("{} {event}\n", stamp(SystemTime::now())));
-      }
+   if ON.load(Ordering::Relaxed)
+      && let Some(sender) = LINES.as_ref()
+   {
+      let _ = sender.send(format!("{} {event}\n", stamp(SystemTime::now())));
    }
 }
 

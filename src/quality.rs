@@ -115,8 +115,8 @@ pub fn prose_applies(prefix: &str, language: &str) -> bool {
    !PROSE_LANGUAGES.contains(&language)
       && !QUOTED[..6].iter().any(|q| line.starts_with(q))
       && !line.contains("//")
-      && line.matches('"').count() % 2 == 0
-      && line.matches('`').count() % 2 == 0
+      && line.matches('"').count().is_multiple_of(2)
+      && line.matches('`').count().is_multiple_of(2)
       && !in_docstring(prefix)
 }
 
@@ -261,7 +261,7 @@ pub fn first_column_problem(text: &str, back: usize, indent: &Indent) -> Option<
    let first = text.split('\n').next().unwrap_or("");
    let own = first.len() - first.trim_start_matches(' ').len();
    let column = indent.line.len().saturating_sub(back) + own;
-   (column % n != 0).then_some("first line off the unit")
+   (!column.is_multiple_of(n)).then_some("first line off the unit")
 }
 
 #[cfg(test)]

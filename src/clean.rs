@@ -76,7 +76,7 @@ fn heal_with<'p>(prefix: &'p str, language: &str, unit: Option<Unit>) -> (&'p st
    let line = &prefix[line_start..];
    if line.trim().is_empty() {
       let off_unit = match unit {
-         Some(Unit::Spaces(n)) => line.contains('\t') || line.len() % n != 0,
+         Some(Unit::Spaces(n)) => line.contains('\t') || !line.len().is_multiple_of(n),
          Some(Unit::Tabs) => line.contains(' '),
          None => false,
       };
@@ -253,10 +253,10 @@ fn follow_indent(text: &str, indent: &Indent, healed: bool) -> String {
       (true, false) => indent.line.len(),
       _ => 0,
    };
-   if base > 0 {
-      if let Some(rest) = lines[0].strip_prefix(indent.line.as_str()) {
-         lines[0] = rest.to_string();
-      }
+   if base > 0
+      && let Some(rest) = lines[0].strip_prefix(indent.line.as_str())
+   {
+      lines[0] = rest.to_string();
    }
    let Some(unit) = indent.unit else {
       return lines.join("\n");
@@ -305,12 +305,12 @@ fn follow_indent(text: &str, indent: &Indent, healed: bool) -> String {
    // keeps to the unit; that line moves to the nearest whole unit, counted
    // from the line start, without going left of the cursor.
    if let (true, Unit::Spaces(n), false) = (indent.at_line_start, unit, indent.aligned) {
-      let on_unit = |l: &String| l.trim().is_empty() || leading(l).len() % n == 0;
+      let on_unit = |l: &String| l.trim().is_empty() || leading(l).len().is_multiple_of(n);
       let first = &lines[0];
       let width = leading(first).len();
       let column = base + width;
       if !first.trim().is_empty()
-         && column % n != 0
+         && !column.is_multiple_of(n)
          && !indent.line.contains('\t')
          && !first[..width].contains('\t')
          && lines[1..].iter().all(on_unit)
