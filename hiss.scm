@@ -37,6 +37,12 @@
 (define (adapter.rope)
    (editor->text (editor->doc-id (editor-focus))))
 
+;; Where the user is: the focused view and its document. Two places compare
+;; with `equal?` (helix-view/src/extension.rs gives both ids an equality).
+(define (adapter.place)
+   (let ([view (editor-focus)])
+      (list view (editor->doc-id view))))
+
 ;; The primary cursor, as a char index.
 (define (adapter.cursor) (cursor-position))
 
@@ -115,13 +121,15 @@
 
 ;;; the ghost
 
-;; What is showing: the text (or #f), the char index it was drawn at, the
-;; document's length then, which tells a typed char from an auto-pair, and
-;; how many chars before the cursor it replaces. A ghost whose line belongs
+;; What is showing: the text (or #f), the view and document it was drawn in,
+;; the char index it was drawn at, the document's length then, which tells a
+;; typed char from an auto-pair, and how many chars before the cursor it
+;; replaces. A ghost whose line belongs
 ;; further left than the cursor (two stray spaces on an empty line, the
 ;; reply at column 0) is drawn from where it goes, so the spaces it replaces
 ;; sit after it.
 (define ghost-text #f)
+(define ghost-place #f)
 (define ghost-index 0)
 (define ghost-length 0)
 (define ghost-back 0)
@@ -133,19 +141,47 @@
 ;; Enter and its indent, an auto-pair, backspace). Removing it only where it
 ;; was drawn would leave it on screen for good, so it is removed at both, and
 ;; at the cursor for good measure.
+(define (hint-remove! index length text)
+   (let* ([moved (+ index (- (adapter.length) length))]
+          [cursor (adapter.cursor)])
+      (adapter.remove-hint! index text)
+      (unless (or (= moved index) (< moved 0))
+         (adapter.remove-hint! moved text))
+      (unless (or (= cursor index) (= cursor moved))
+         (adapter.remove-hint! cursor text))))
+
+;; A ghost in a view that lost the focus (a mouse click into another split)
+;; cannot be removed from here, since hints are removed in the focused view.
+;; It is kept as `(place index length text)` and removed the next time its
+;; view has the focus.
+(define orphan #f)
+
+(define (orphan-sweep!)
+   (when (and orphan (equal? (list-ref orphan 0) (adapter.place)))
+      (hint-remove! (list-ref orphan 1) (list-ref orphan 2) (list-ref orphan 3))
+      (set! orphan #f)))
+
 (define (ghost-hide!)
+   (orphan-sweep!)
    (when ghost-text
-      (let* ([moved (+ ghost-index (- (adapter.length) ghost-length))]
-             [cursor (adapter.cursor)])
-         (adapter.remove-hint! ghost-index ghost-text)
-         (unless (or (= moved ghost-index) (< moved 0))
-            (adapter.remove-hint! moved ghost-text))
-         (unless (or (= cursor ghost-index) (= cursor moved))
-            (adapter.remove-hint! cursor ghost-text))))
+      (if (equal? (adapter.place) ghost-place)
+          (hint-remove! ghost-index ghost-length ghost-text)
+          (set! orphan (list ghost-place ghost-index ghost-length ghost-text))))
    (set! ghost-text #f))
+
+;; Whether the ghost still stands where it was drawn: the same view and
+;; document, the cursor where it was and no edit since. A mouse click and a
+;; completion taken from the menu move the cursor or change the text without
+;; running a command, so no hook of hiss's clears the ghost for them.
+(define (ghost-fits?)
+   (and ghost-text
+        (equal? (adapter.place) ghost-place)
+        (= (adapter.cursor) (+ ghost-index ghost-back))
+        (= (adapter.length) ghost-length)))
 
 (define (ghost-show! index text back)
    (ghost-hide!)
+   (set! ghost-place (adapter.place))
    (set! ghost-index index)
    (set! ghost-length (adapter.length))
    (set! ghost-text text)
@@ -159,12 +195,22 @@
    (adapter.text-around index context-before context-after))
 
 ;; The request whose pieces may still be drawn; a counter that makes stale
-;; callbacks (older requests, older debounce timers) do nothing; the char
-;; index the request was made at; and what has been typed through since.
+;; callbacks (older requests, older debounce timers) do nothing; where the
+;; request was made (the view and document, the char index, the document's
+;; length); and what has been typed through since.
 (define request-id #f)
 (define generation 0)
+(define request-place #f)
+(define request-length 0)
 (define origin 0)
 (define typed "")
+
+;; Whether the text is still as the request left it, but for what was typed
+;; through: its pieces are drawn only then (see `ghost-fits?`).
+(define (request-fits?)
+   (and (equal? (adapter.place) request-place)
+        (= (adapter.cursor) (+ origin (string-length typed)))
+        (= (adapter.length) (+ request-length (string-length typed)))))
 
 (define (clear!)
    (set! generation (+ generation 1))
@@ -188,6 +234,7 @@
                 (let ([message (or (native.hiss-error)
                                    (and report (or (native.hiss-timing) "hiss: nothing")))])
                    (when message (adapter.status! message)))]
+               [(not (request-fits?)) (clear!)]
                [(and (> (car piece) 0) (equal? typed ""))
                 (ghost-show! (- origin (car piece)) (cadr piece) (car piece))
                 (follow! id gen report)]
@@ -213,6 +260,8 @@
       (if id
           (begin
              (set! request-id id)
+             (set! request-place (adapter.place))
+             (set! request-length (adapter.length))
              (set! origin index)
              (follow! id generation report))
           (let ([message (or (native.hiss-error) (and report "hiss: no request"))])
@@ -293,6 +342,15 @@
          (set! config-problem #f))
       (schedule! 0)))
 
+;; The cursor moved or the text changed. Typing, commands and hiss's own
+;; drawing leave the ghost and the request fitting, so this clears only
+;; after what no other hook sees. It runs after the key was handled.
+(define (on-selection view)
+   (orphan-sweep!)
+   (when (or (and ghost-text (not (ghost-fits?)))
+             (and request-id (not (request-fits?))))
+      (clear!)))
+
 ;;; commands
 
 ;;@doc
@@ -320,7 +378,7 @@
 ;;@doc
 ;; Insert the ghost at the cursor. With no ghost showing, do what tab does.
 (define (hiss-accept)
-   (if (and ghost-text (adapter.one-cursor?))
+   (if (and (ghost-fits?) (adapter.one-cursor?))
        (let* ([text ghost-text]
               [back ghost-back]
               [lead (adapter.line-before (adapter.cursor))]
@@ -365,3 +423,4 @@
 (adapter.on-hook! "post-insert-char" on-char)
 (adapter.on-hook! "post-command" on-command)
 (adapter.on-hook! "on-mode-switch" on-mode-switch)
+(adapter.on-hook! "selection-did-change" on-selection)
