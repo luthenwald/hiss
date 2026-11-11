@@ -83,7 +83,18 @@ root="$(cd "$(dirname "$0")" && pwd)"
 echo "Building libhiss ($profile)..."
 (cd "$root" && cargo build --quiet --profile "$profile")
 
-built="$root/target/$profile/$dylib"
+# Cargo builds into target/ unless CARGO_TARGET_DIR names another folder
+# (read from the project when relative), and the dev profile into debug/.
+target="${CARGO_TARGET_DIR:-target}"
+case "$target" in
+   /*) ;;
+   *) target="$root/$target" ;;
+esac
+case "$profile" in
+   dev) folder=debug ;;
+   *) folder="$profile" ;;
+esac
+built="$target/$folder/$dylib"
 [ -f "$built" ] || { echo "The build did not give $built." >&2; exit 1; }
 
 # A library that does not load would make Steel's loader take the editor
