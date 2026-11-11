@@ -79,6 +79,13 @@
 ;; What tab does without hiss.
 (define (adapter.tab!) (helix.static.smart_tab))
 
+;; Whether the document has a single cursor (helix/static.scm,
+;; current-selection-object and selection->ranges). Inserting acts on every
+;; cursor while the ghost belongs to the primary one, so hiss keeps quiet
+;; with more.
+(define (adapter.one-cursor?)
+   (= (length (helix.static.selection->ranges (helix.static.current-selection-object))) 1))
+
 (define (adapter.status! message) (set-status! message))
 
 (define (adapter.on-hook! event callback) (register-hook! event callback))
@@ -222,7 +229,8 @@
 (define (schedule!)
    (when enabled
       (let* ([gen generation]
-             [still? (lambda () (and enabled (= gen generation) (adapter.insert-mode?)))])
+             [still? (lambda ()
+                        (and enabled (= gen generation) (adapter.insert-mode?) (adapter.one-cursor?)))])
          (adapter.after! 0
             (lambda ()
                (when (and (still?) (not (show-cached!)))
@@ -294,7 +302,7 @@
 ;;@doc
 ;; Insert the ghost at the cursor. With no ghost showing, do what tab does.
 (define (hiss-accept)
-   (if ghost-text
+   (if (and ghost-text (adapter.one-cursor?))
        (let* ([text ghost-text]
               [back ghost-back]
               [lead (adapter.line-before (adapter.cursor))]
@@ -315,7 +323,9 @@
 ;;@doc
 ;; Ask for a completion at the cursor now, and show its timing when it ends.
 (define (hiss-try)
-   (request! #t)
+   (if (adapter.one-cursor?)
+       (request! #t)
+       (adapter.status! "hiss: one cursor only"))
    void)
 
 ;;@doc
