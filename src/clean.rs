@@ -170,6 +170,16 @@ pub fn blank_line(text: &str) -> Option<usize> {
    })
 }
 
+/// A reply that ran into the token limit, without its last line, which is
+/// unfinished. A reply of one line stays as it is, since half a line is
+/// still worth showing when it is all there is.
+pub fn whole_lines(text: &str) -> &str {
+   match text.rfind('\n') {
+      Some(at) if !text[..at].trim().is_empty() => &text[..at],
+      _ => text,
+   }
+}
+
 /// A reply that writes its line breaks as `\n` escapes, all on one line
 /// (`\n\ninstance Monad List where\n ...`), with the breaks put back. Only
 /// one that starts with two escapes and has no real break, outside strings
@@ -604,6 +614,14 @@ mod tests {
    }
 
    const BLOCK: &str = "fn f() {\n   if x {\n      y\n   }\n";
+
+   #[test]
+   fn a_reply_at_the_token_limit_loses_its_half_line() {
+      assert_eq!(whole_lines("let a = 1;\nlet b = fo"), "let a = 1;");
+      assert_eq!(whole_lines("let a = 1;\n"), "let a = 1;");
+      assert_eq!(whole_lines("let a = fo"), "let a = fo");
+      assert_eq!(whole_lines("\n   let a = fo"), "\n   let a = fo");
+   }
 
    #[test]
    fn the_lines_own_indent_is_split_from_the_reply() {

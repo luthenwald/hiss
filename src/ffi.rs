@@ -33,7 +33,7 @@ use abi_stable::std_types::{RBoxError, RResult};
 use steel::steel_vm::ffi::{FFIValue, FfiFuture, FfiFutureExt};
 use tokio::sync::watch;
 
-use crate::api::{Client, Failure, Request, Timing};
+use crate::api::{self, Client, Failure, Request, Timing};
 use crate::cache::{self, Cache, Ghost, Key};
 use crate::{RUNTIME, config, exclude, guarded, log};
 
@@ -306,8 +306,12 @@ pub fn start(
             .await;
          trace.finish(&result);
          // Only a finished suggestion is kept; an empty one is asked for
-         // again next time, since the model may answer then.
-         if result.is_ok() && !last.1.is_empty() {
+         // again next time, since the model may answer then, and so is one
+         // whose stream was cut off.
+         let whole = result
+            .as_ref()
+            .is_ok_and(|timing| timing.stop_reason != api::CUT);
+         if whole && !last.1.is_empty() {
             cached(|cache| cache.put(key, last));
          }
          match result {

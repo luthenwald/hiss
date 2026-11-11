@@ -15,6 +15,11 @@ const MESSAGES: &str = "https://api.anthropic.com/v1/messages";
 const MODELS: &str = "https://api.anthropic.com/v1/models/";
 const VERSION: &str = "2023-06-01";
 
+/// The stop reason of a reply whose stream ended before the API said it
+/// was done: the connection closed in the middle. Such a reply is shown but
+/// not kept (`cache`).
+pub const CUT: &str = "cut";
+
 /// The instructions. One sentence on purpose: a fuller prompt, with rules
 /// or with worked examples, made the model explain ordinary code instead of
 /// completing it (`just quality`, 2026-11-09). Broken files are left to the
@@ -285,6 +290,7 @@ impl Client {
          return Err(Failure::refused(status.as_u16(), &text));
       }
 
+      timing.stop_reason.clear();
       let mut parser = sse::Parser::default();
       let mut decoder = sse::Decoder::default();
       let mut wire = String::new();
@@ -352,6 +358,12 @@ impl Client {
                None => {}
             }
          }
+      }
+      match timing.stop_reason.as_str() {
+         "" => timing.stop_reason = CUT.into(),
+         // The token limit stops the reply anywhere, mid-word as well.
+         "max_tokens" => raw.truncate(clean::whole_lines(&raw).len()),
+         _ => {}
       }
       let cleaned = clean::clean_end(&raw, shape);
       let cut = cleaned.prose;
