@@ -230,10 +230,14 @@
       (if hit #t #f)))
 
 ;; Shows a suggestion made before for this very text (after an undo, or a
-;; deleted char typed again), or else asks after the debounce, unless
+;; deleted char typed again), or else asks after `wait` milliseconds, unless
 ;; something happened in between. The first step waits for the current
 ;; command to finish its edit (`o` inserts its line after the mode switch).
-(define (schedule!)
+;;
+;; Typing waits for the debounce, since more keys are likely to follow. Tab,
+;; a ghost typed to its end and a fresh insert mode come after a pause the
+;; user already made, so they ask at once.
+(define (schedule! wait)
    (when enabled
       (let* ([gen generation]
              [still? (lambda ()
@@ -241,7 +245,7 @@
          (adapter.after! 0
             (lambda ()
                (when (and (still?) (not (show-cached!)))
-                  (adapter.after! debounce-ms
+                  (adapter.after! wait
                      (lambda ()
                         (when (still?)
                            (request! #f))))))))))
@@ -259,9 +263,9 @@
        (let ([rest (substring ghost-text 1)])
           (set! typed (string-append typed (string char)))
           (if (equal? rest "")
-              (begin (clear!) (schedule!))
+              (begin (clear!) (schedule! 0))
               (ghost-show! (adapter.cursor) rest 0)))
-       (begin (clear!) (schedule!))))
+       (begin (clear!) (schedule! debounce-ms))))
 
 ;; Commands that edit text in insert mode ask again; any other command (a
 ;; cursor move, a mode switch) only clears. hiss's own commands are left alone.
@@ -274,7 +278,7 @@
    (unless (starts-with? name "hiss")
       (clear!)
       (when (member name edit-commands)
-         (schedule!))))
+         (schedule! debounce-ms))))
 
 (define (on-mode-switch event)
    (clear!)
@@ -282,7 +286,7 @@
       (when config-problem
          (adapter.status! config-problem)
          (set! config-problem #f))
-      (schedule!)))
+      (schedule! 0)))
 
 ;;; commands
 
@@ -322,11 +326,12 @@
              (unless (equal? kept "")
                 (adapter.insert! kept)))
           (adapter.insert! text)
-          (native.hiss-accepted! (string-length text)))
+          (native.hiss-accepted! (string-length text))
+          (schedule! 0))
        (begin
           (clear!)
-          (adapter.tab!)))
-   (schedule!)
+          (adapter.tab!)
+          (schedule! debounce-ms)))
    void)
 
 ;;@doc

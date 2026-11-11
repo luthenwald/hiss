@@ -48,7 +48,7 @@ Then set `theme = "base16_terminal_hiss"` in Helix's `config.toml`.
 
 ## Using it
 
-hiss starts on. A short pause in insert mode brings a suggestion, over as many lines as it needs. When you type what it shows, it shortens as you go; when you type something else, it goes away and hiss asks again after the next pause.
+hiss starts on. A short pause in insert mode brings a suggestion, over as many lines as it needs. After tab takes a suggestion, and when you enter insert mode, hiss asks right away without waiting for the pause. When you type what it shows, it shortens as you go; when you type something else, it goes away and hiss asks again after the next pause.
 
 | command | what it does |
 |---|---|
