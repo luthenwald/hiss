@@ -371,10 +371,13 @@ pub struct Failure {
 }
 
 impl Failure {
+   /// The address is left out, since it is always the API's, and the cause
+   /// is added: reqwest's own line says only that sending failed.
    fn network(error: reqwest::Error) -> Failure {
+      let transient = !error.is_builder() && !error.is_decode();
       Failure {
-         message: format!("hiss: {error}"),
-         transient: !error.is_builder() && !error.is_decode(),
+         message: format!("hiss: {}", with_cause(&error.without_url())),
+         transient,
          lasting: false,
       }
    }
@@ -390,6 +393,17 @@ impl Failure {
          transient: code == 429 || code >= 500,
          lasting: matches!(code, 400 | 401 | 403 | 404),
       }
+   }
+}
+
+/// An error's own line, then its innermost cause when it names one, as
+/// `error sending request: connection refused`.
+fn with_cause(error: &dyn std::error::Error) -> String {
+   let root = std::iter::successors(error.source(), |cause| cause.source()).last();
+   let line = error.to_string();
+   match root.map(|root| root.to_string()) {
+      Some(root) if !line.contains(&root) => format!("{line}: {root}"),
+      _ => line,
    }
 }
 
@@ -545,6 +559,35 @@ mod tests {
       let busy = Failure::refused(529, "");
       assert!(busy.transient && !busy.lasting);
       assert!(!Failure::refused(429, "").lasting);
+   }
+
+   #[test]
+   fn an_error_names_its_innermost_cause() {
+      #[derive(Debug)]
+      struct Layer(&'static str, Option<Box<Layer>>);
+      impl fmt::Display for Layer {
+         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+         }
+      }
+      impl std::error::Error for Layer {
+         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|inner| inner as _)
+         }
+      }
+      let layer = |text, inner: Option<Layer>| Layer(text, inner.map(Box::new));
+      let refused = layer(
+         "error sending request",
+         Some(layer(
+            "client error",
+            Some(layer("connection refused", None)),
+         )),
+      );
+      assert_eq!(
+         with_cause(&refused),
+         "error sending request: connection refused"
+      );
+      assert_eq!(with_cause(&layer("timed out", None)), "timed out");
    }
 
    #[test]

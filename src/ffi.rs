@@ -12,6 +12,11 @@
 //! `hiss-start!` asks nothing more until a request the user made, or
 //! `hiss-resume!`.
 //!
+//! Errors that may pass (no network, an overloaded API) pause the automatic
+//! requests for a while once they come twice in a row (`Backoff`), so that
+//! an editor without a connection does not fail again at every pause in
+//! typing.
+//!
 //! Futures handed to Steel are polled on Helix's runtime, so they only wait on
 //! channels, and each poll runs under `catch_unwind`.
 
@@ -52,6 +57,56 @@ static CONTACT: Mutex<Option<Instant>> = Mutex::new(None);
 /// so sooner; a warm-up over a live connection costs one round trip.
 const QUIET: Duration = Duration::from_secs(60);
 
+/// Failures that may pass, counted while they come one after another, and
+/// until when the automatic requests wait because of them.
+#[derive(Debug, Default)]
+struct Backoff {
+   failures: u32,
+   until: Option<Instant>,
+}
+
+impl Backoff {
+   /// The failure in a row that starts the first pause.
+   const AFTER: u32 = 2;
+
+   /// Notes a failure at `now`. From the second in a row on, a pause
+   /// starts, and its length in seconds is returned: 30, then twice as long
+   /// each time, up to five minutes.
+   fn failure(&mut self, now: Instant) -> Option<u64> {
+      self.failures += 1;
+      let doublings = self.failures.checked_sub(Self::AFTER)?;
+      let secs = (30u64 << doublings.min(4)).min(300);
+      self.until = Some(now + Duration::from_secs(secs));
+      Some(secs)
+   }
+
+   fn waiting(&self, now: Instant) -> bool {
+      self.until.is_some_and(|until| now < until)
+   }
+}
+
+static BACKOFF: Mutex<Backoff> = Mutex::new(Backoff {
+   failures: 0,
+   until: None,
+});
+
+fn backoff<T>(f: impl FnOnce(&mut Backoff) -> T) -> T {
+   f(&mut BACKOFF.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Whether automatic requests are held back: halted by a lasting refusal,
+/// or waiting after failures that may pass.
+fn held_back() -> bool {
+   HALTED.load(Ordering::Relaxed) || backoff(|b| b.waiting(Instant::now()))
+}
+
+/// Lets automatic requests ask again: after a request of the user's own,
+/// `hiss-resume!`, or an answer from the API.
+fn let_go() {
+   HALTED.store(false, Ordering::Relaxed);
+   backoff(|b| *b = Backoff::default());
+}
+
 fn contact() -> Option<Instant> {
    CONTACT
       .lock()
@@ -59,13 +114,25 @@ fn contact() -> Option<Instant> {
       .replace(Instant::now())
 }
 
-/// Keeps `failure` for the status line, and halts the automatic requests
-/// when it would come back with every one of them.
+/// Keeps `failure` for the status line, halts the automatic requests when
+/// it would come back with every one of them, and pauses them when it is
+/// the second in a row that may pass; the message then says for how long.
 fn failed(failure: Failure) {
    if failure.lasting {
       HALTED.store(true, Ordering::Relaxed);
    }
-   with_last(|last| last.error = Some(failure.message));
+   let pause = failure
+      .transient
+      .then(|| backoff(|b| b.failure(Instant::now())))
+      .flatten();
+   let message = match pause {
+      Some(secs) => {
+         log::write(&format!("pause secs={secs}"));
+         format!("{}; asking again in {secs} s", failure.message)
+      }
+      None => failure.message,
+   };
+   with_last(|last| last.error = Some(message));
 }
 
 fn cached<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
@@ -152,7 +219,10 @@ pub fn warm_up() {
          let client = Arc::clone(client);
          RUNTIME.spawn(async move {
             match client.warm(&config::config().request.model).await {
-               Ok(took) => log::write(&format!("warm after={}", took.as_millis())),
+               Ok(took) => {
+                  backoff(|b| *b = Backoff::default());
+                  log::write(&format!("warm after={}", took.as_millis()));
+               }
                Err(failure) => {
                   log::write(&format!("warm error {}", log::word(&failure.message)));
                   failed(failure);
@@ -172,7 +242,7 @@ pub fn warm_again() -> Result<bool, String> {
          .lock()
          .unwrap_or_else(|e| e.into_inner())
          .is_none_or(|last| last.elapsed() >= QUIET);
-      let warm = quiet && !HALTED.load(Ordering::Relaxed);
+      let warm = quiet && !held_back();
       if warm {
          warm_up();
       }
@@ -182,7 +252,8 @@ pub fn warm_again() -> Result<bool, String> {
 
 /// `(hiss-start! prefix suffix language path auto)`: the new request's id,
 /// or `#f` when there is no client (see `hiss-error`) or, for an automatic
-/// request (`auto`), while a lasting refusal halts them.
+/// request (`auto`), while a lasting refusal halts them or failures that
+/// may pass make them wait.
 pub fn start(
    prefix: String,
    suffix: String,
@@ -191,7 +262,7 @@ pub fn start(
    auto: bool,
 ) -> Result<Option<usize>, String> {
    guarded("hiss-start!", || {
-      if auto && HALTED.load(Ordering::Relaxed) {
+      if auto && held_back() {
          return None;
       }
       if excluded(&path, &language) {
@@ -200,7 +271,9 @@ pub fn start(
          }
          return None;
       }
-      HALTED.store(false, Ordering::Relaxed);
+      if !auto {
+         let_go();
+      }
       let client = match CLIENT.as_ref() {
          Ok(client) => Arc::clone(client),
          Err(error) => {
@@ -238,7 +311,10 @@ pub fn start(
             cached(|cache| cache.put(key, last));
          }
          match result {
-            Ok(timing) => with_last(|last| last.timing = Some(timing.to_string())),
+            Ok(timing) => {
+               backoff(|b| *b = Backoff::default());
+               with_last(|last| last.timing = Some(timing.to_string()));
+            }
             Err(failure) => failed(failure),
          }
       });
@@ -322,10 +398,10 @@ pub fn cancel(id: usize) -> Result<bool, String> {
 }
 
 /// `(hiss-resume!)`: lets automatic requests ask again after a lasting
-/// refusal (`:hiss-on`).
+/// refusal or during a pause (`:hiss-on`).
 pub fn resume() -> Result<bool, String> {
    guarded("hiss-resume!", || {
-      HALTED.store(false, Ordering::Relaxed);
+      let_go();
       true
    })
 }
@@ -465,6 +541,19 @@ mod tests {
       assert_eq!(shown_path("", cwd), "");
       // A buffer named after the directory itself still shows a name.
       assert_eq!(shown_path("/home/someone/project", cwd), "project");
+   }
+
+   #[test]
+   fn failures_in_a_row_pause_longer_each_time() {
+      let now = Instant::now();
+      let mut backoff = Backoff::default();
+      assert_eq!(backoff.failure(now), None);
+      assert!(!backoff.waiting(now));
+      assert_eq!(backoff.failure(now), Some(30));
+      assert!(backoff.waiting(now + Duration::from_secs(29)));
+      assert!(!backoff.waiting(now + Duration::from_secs(30)));
+      let later: Vec<_> = (0..5).filter_map(|_| backoff.failure(now)).collect();
+      assert_eq!(later, [60, 120, 240, 300, 300]);
    }
 
    #[test]

@@ -94,6 +94,7 @@ hiss writes one line per request to `~/.local/state/hiss/hiss.log` (under `$XDG_
 
 - No suggestion appears. Run `:hiss-try`: the status line shows the time the answer took, or what went wrong, such as `hiss: no api key` when Helix was started without the key in its environment. A setting hiss could not read is named in the status line the first time you enter insert mode. The log shows whether requests are sent and how they end.
 - Suggestions stopped after an error. When the API turns down every request in the same way, for a missing or wrong key or a `model` it does not know, hiss says so once and stops asking. Fix the cause, then run `:hiss-try` or `:hiss-on`, and hiss asks again.
+- Suggestions pause after `asking again in 30 s`. The network or the API failed twice in a row, so hiss waits before it asks by itself again, longer each time up to five minutes. `:hiss-try` and `:hiss-on` end the wait.
 - The suggestion looks like ordinary text. Your theme has no `ui.virtual.inlay-hint` color; see the end of Installing.
 - Helix stops at start after a fork update. The library no longer matches the editor; see Requirements for the versions to copy, then run `./install.sh` again.
 - The suggestion vanishes now and then. With `lsp.display-inlay-hints = true` in Helix's config, a language server's hints are redrawn from time to time, and the redraw can take the suggestion with it. hiss asks again after your next edit.
