@@ -202,7 +202,7 @@ fn main() -> Result<(), String> {
       }
       let mut tallies = Vec::new();
       for path in &options.fixtures {
-         let request = request(path)?;
+         let request = request(path)?.cut(&settings);
          let indent = Shape::new(&request.prefix, &request.suffix, &request.language).indent;
          let name = path.rsplit('/').next().unwrap_or(path).to_string();
          let mut tally = Tally {
@@ -314,6 +314,7 @@ async fn bench(client: &Client, options: &Options, base: &Settings) -> Result<()
       for run in 1..=options.runs {
          for ((label, settings), (ttfts, totals)) in variants.iter().zip(&mut times) {
             let mut last = String::new();
+            let request = request.clone().cut(settings);
             let timing = client
                .complete(&request, settings, |text, _| last = text.to_string())
                .await?;

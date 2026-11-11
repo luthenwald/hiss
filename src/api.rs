@@ -66,6 +66,19 @@ pub struct Request {
    pub path: String,
 }
 
+impl Request {
+   /// The window a request sends: at most `prefix_chars` before the cursor
+   /// and `suffix_chars` after it, cut at line boundaries. `Client::complete`
+   /// and `body` take a request cut this way.
+   pub fn cut(self, settings: &Settings) -> Request {
+      Request {
+         prefix: clean::tail_lines(&self.prefix, settings.prefix_chars).to_string(),
+         suffix: clean::head_lines(&self.suffix, settings.suffix_chars).to_string(),
+         ..self
+      }
+   }
+}
+
 /// What one request cost in time and size. Never any text.
 #[derive(Debug, Clone, Default)]
 pub struct Timing {
@@ -183,20 +196,16 @@ impl Client {
    /// reply is only prose, which the cleaning cuts to nothing, it asks again
    /// at once (up to `prose_retries` times), with the model's prose as its
    /// earlier turn and a note that only code is wanted. Returns the timing,
-   /// or why it failed.
+   /// or why it failed. `request` is cut already (`Request::cut`).
    pub async fn complete(
       &self,
       request: &Request,
       settings: &Settings,
       mut on_text: impl FnMut(&str, usize),
    ) -> Result<Timing, Failure> {
-      let mut shape = clean::Shape::new(
-         clean::tail_lines(&request.prefix, settings.prefix_chars),
-         clean::head_lines(&request.suffix, settings.suffix_chars),
-         &request.language,
-      );
+      let mut shape = clean::Shape::new(&request.prefix, &request.suffix, &request.language);
       shape.prose_guard &= settings.prose_guard;
-      let mut body = body(request, settings);
+      let mut body = body(request, &shape, settings);
       let start = Instant::now();
       let mut timing = Timing::default();
       let mut reply = self
@@ -426,21 +435,21 @@ fn word_note(word: &str) -> String {
    )
 }
 
-/// The request body of spec 04/08. No sampling parameters and no prefill:
-/// both return a 400 on the 5.5 models. No stop sequence either (see
-/// `BLANK_LINE`).
-pub fn body(request: &Request, settings: &Settings) -> Value {
-   let prefix = clean::tail_lines(&request.prefix, settings.prefix_chars);
-   let suffix = clean::head_lines(&request.suffix, settings.suffix_chars);
+/// The request body of spec 04/08, for a cut `request` and its `shape`.
+/// No sampling parameters and no prefill: both return a 400 on the 5.5
+/// models. No stop sequence either (see `clean::blank_line`).
+pub fn body(request: &Request, shape: &clean::Shape, settings: &Settings) -> Value {
+   let suffix = shape.suffix;
    let path = attribute(&request.path);
    let language = attribute(&request.language);
-   let indent = clean::indent_of(prefix)
+   let indent = shape
+      .indent
       .unit
       .map(|unit| format!(" indent=\"{unit}\""))
       .unwrap_or_default();
-   let (sent, typed) = clean::heal(prefix, &request.language);
-   let note = match typed {
-      clean::Typed::Word(word) => format!("\n{}", word_note(&word)),
+   let sent = shape.sent();
+   let note = match &shape.typed {
+      clean::Typed::Word(word) => format!("\n{}", word_note(word)),
       _ => String::new(),
    };
    let open = format!("<file path=\"{path}\" lang=\"{language}\"{indent}>\n");
@@ -493,6 +502,13 @@ fn cache_split(sent: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   /// The body for an uncut request, as `complete` would send it.
+   fn body(request: &Request, settings: &Settings) -> Value {
+      let request = request.clone().cut(settings);
+      let shape = clean::Shape::new(&request.prefix, &request.suffix, &request.language);
+      super::body(&request, &shape, settings)
+   }
 
    #[test]
    fn body_has_no_sampling_and_ends_with_the_user() {

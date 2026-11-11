@@ -28,9 +28,9 @@ use abi_stable::std_types::{RBoxError, RResult};
 use steel::steel_vm::ffi::{FFIValue, FfiFuture, FfiFutureExt};
 use tokio::sync::watch;
 
-use crate::api::{Client, Failure, Request, Settings, Timing};
+use crate::api::{Client, Failure, Request, Timing};
 use crate::cache::{self, Cache, Ghost, Key};
-use crate::{RUNTIME, clean, config, guarded, log};
+use crate::{RUNTIME, config, guarded, log};
 
 struct Entry {
    text: Arc<tokio::sync::Mutex<watch::Receiver<(usize, String)>>>,
@@ -57,17 +57,28 @@ fn cached<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
    f(&mut CACHE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
-/// The window a request sends: the text around the cursor, cut at lines.
-fn window<'a>(prefix: &'a str, suffix: &'a str, settings: &Settings) -> (&'a str, &'a str) {
-   (
-      clean::tail_lines(prefix, settings.prefix_chars),
-      clean::head_lines(suffix, settings.suffix_chars),
+/// The request the editor's text makes, cut to the window that is sent.
+fn request(prefix: String, suffix: String, language: String, path: &str) -> Request {
+   let request = Request {
+      prefix,
+      suffix,
+      language,
+      path: shown(path),
+   };
+   request.cut(&config::config().request)
+}
+
+fn key(request: &Request) -> Key {
+   Key::new(
+      &request.prefix,
+      &request.suffix,
+      &request.language,
+      &request.path,
    )
 }
 
-fn key(prefix: &str, suffix: &str, language: &str, path: &str, settings: &Settings) -> Key {
-   let (before, after) = window(prefix, suffix, settings);
-   Key::new(before, after, language, path)
+fn chars(text: &str) -> usize {
+   text.chars().count()
 }
 
 /// The path a request names: relative to the working directory (Helix's,
@@ -159,15 +170,9 @@ pub fn start(
       let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
       let (sender, receiver) = watch::channel((0, String::new()));
       let settings = config::config().request.clone();
-      let path = shown(&path);
-      let mut trace = Trace::new(id, &prefix, &suffix, &settings);
-      let key = key(&prefix, &suffix, &language, &path, &settings);
-      let request = Request {
-         prefix,
-         suffix,
-         language,
-         path,
-      };
+      let request = request(prefix, suffix, language, &path);
+      let mut trace = Trace::new(id, &request);
+      let key = key(&request);
       let task = RUNTIME.spawn(async move {
          let start = trace.start;
          let mut last: Ghost = (0, String::new());
@@ -240,17 +245,15 @@ fn steel_future(future: impl Future<Output = FFIValue> + Send + 'static) -> FFIV
 /// request made for the same text, as `(back text)`, or `#f`.
 pub fn cached_ghost(prefix: String, suffix: String, language: String, path: String) -> FFIValue {
    guarded("hiss-cached", || {
-      let settings = &config::config().request;
-      let path = shown(&path);
-      let ghost = cached(|cache| cache.get(key(&prefix, &suffix, &language, &path, settings)));
+      let request = request(prefix, suffix, language, &path);
+      let ghost = cached(|cache| cache.get(key(&request)));
       match ghost {
          Some(ghost) => {
-            let (before, after) = window(&prefix, &suffix, settings);
             log::write(&format!(
                "hit chars={} ctx={}+{}",
-               ghost.1.chars().count(),
-               before.chars().count(),
-               after.chars().count(),
+               chars(&ghost.1),
+               chars(&request.prefix),
+               chars(&request.suffix),
             ));
             ghost_value(&ghost)
          }
@@ -323,15 +326,11 @@ struct Trace {
 }
 
 impl Trace {
-   fn new(id: usize, prefix: &str, suffix: &str, settings: &Settings) -> Trace {
-      let chars = |text: &str| text.chars().count();
+   fn new(id: usize, request: &Request) -> Trace {
       Trace {
          id,
          start: Instant::now(),
-         context: {
-            let (before, after) = window(prefix, suffix, settings);
-            (chars(before), chars(after))
-         },
+         context: (chars(&request.prefix), chars(&request.suffix)),
          first_text: None,
          done: false,
       }

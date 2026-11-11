@@ -20,16 +20,27 @@ pub struct Shape<'a> {
 
 impl<'a> Shape<'a> {
    pub fn new(prefix: &'a str, suffix: &'a str, language: &str) -> Shape<'a> {
+      let indent = indent_of(prefix);
       Shape {
          prefix,
          suffix,
+         typed: heal_with(prefix, language, indent.unit).1,
          indent: Indent {
             aligned: ALIGNED.contains(&language),
-            ..indent_of(prefix)
+            ..indent
          },
          prose_guard: quality::prose_applies(prefix, language),
-         typed: heal(prefix, language).1,
       }
+   }
+
+   /// The text before the cursor that the request sends: the prefix without
+   /// what `heal` leaves out.
+   pub fn sent(&self) -> &'a str {
+      let left_out = match &self.typed {
+         Typed::Word(text) | Typed::Lead(text) => text.len(),
+         Typed::Nothing => 0,
+      };
+      &self.prefix[..self.prefix.len() - left_out]
    }
 }
 
@@ -56,10 +67,15 @@ pub enum Typed {
 /// Splits the text before the cursor into what the request sends and what it
 /// leaves out.
 pub fn heal<'p>(prefix: &'p str, language: &str) -> (&'p str, Typed) {
+   heal_with(prefix, language, indent_of(prefix).unit)
+}
+
+/// `heal`, with the file's unit read already.
+fn heal_with<'p>(prefix: &'p str, language: &str, unit: Option<Unit>) -> (&'p str, Typed) {
    let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
    let line = &prefix[line_start..];
    if line.trim().is_empty() {
-      let off_unit = match indent_of(prefix).unit {
+      let off_unit = match unit {
          Some(Unit::Spaces(n)) => line.contains('\t') || line.len() % n != 0,
          Some(Unit::Tabs) => line.contains(' '),
          None => false,
@@ -631,6 +647,16 @@ mod tests {
          heal("(hiss-con", "scheme").1,
          Typed::Word("hiss-con".into())
       );
+      for (prefix, language) in [
+         ("x\nimpo", "haskell"),
+         ("a {\n   b\n  ", "rust"),
+         ("f(a, ", "rust"),
+      ] {
+         assert_eq!(
+            Shape::new(prefix, "", language).sent(),
+            heal(prefix, language).0
+         );
+      }
       let shape = Shape::new("x = 1\nimpo", "", "haskell");
       let clean = |raw| super::clean(raw, &shape).text;
       assert_eq!(clean("import Prelude"), "rt Prelude");
