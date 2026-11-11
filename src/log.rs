@@ -4,9 +4,11 @@
 //!
 //! Lines go through a channel to a thread of their own, so writing never
 //! blocks Helix or the runtime, and a line that cannot be written is dropped.
+//! A log that has grown past `KEEP` bytes moves to `hiss.log.1` when that
+//! thread starts, replacing the one there, so the two stay small.
 
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -18,21 +20,33 @@ use crate::api::Timing;
 
 static ON: AtomicBool = AtomicBool::new(true);
 
+/// About ten thousand lines, a few days of steady use.
+const KEEP: u64 = 1 << 20;
+
 static LINES: LazyLock<Option<Sender<String>>> = LazyLock::new(|| {
    let path = path(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?;
    let (sender, receiver) = mpsc::channel::<String>();
    std::thread::Builder::new()
       .name("hiss-log".into())
       .spawn(move || {
+         rotate(&path, KEEP);
+         let mut file = None;
          for line in receiver {
-            let _ = append(&path, &line);
+            if file.is_none() {
+               file = open(&path).ok();
+            }
+            if let Some(open) = file.as_mut() {
+               if open.write_all(line.as_bytes()).is_err() {
+                  file = None;
+               }
+            }
          }
       })
       .ok()?;
    Some(sender)
 });
 
-/// Turns the log on or off (`(hiss-configure #:log #f)`).
+/// Turns the log on or off (`log` in `config.toml`).
 pub fn set_on(on: bool) {
    ON.store(on, Ordering::Relaxed);
 }
@@ -94,15 +108,20 @@ fn path(state: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
       .map(|state| state.join("hiss").join("hiss.log"))
 }
 
-fn append(path: &Path, line: &str) -> std::io::Result<()> {
+fn open(path: &Path) -> std::io::Result<File> {
    if let Some(dir) = path.parent() {
       fs::create_dir_all(dir)?;
    }
-   OpenOptions::new()
-      .create(true)
-      .append(true)
-      .open(path)?
-      .write_all(line.as_bytes())
+   OpenOptions::new().create(true).append(true).open(path)
+}
+
+/// Moves the log at `path` to `<path>.1` when it is larger than `keep`.
+fn rotate(path: &Path, keep: u64) {
+   if fs::metadata(path).is_ok_and(|meta| meta.len() > keep) {
+      let mut old = path.as_os_str().to_owned();
+      old.push(".1");
+      let _ = fs::rename(path, old);
+   }
 }
 
 /// UTC, as `2026-11-10T14:03:22Z`.
@@ -154,6 +173,21 @@ mod tests {
          Some(PathBuf::from("/h/.local/state/hiss/hiss.log"))
       );
       assert_eq!(path(None, None), None);
+   }
+
+   #[test]
+   fn a_large_log_moves_aside() {
+      let dir = std::env::temp_dir().join(format!("hiss-log-test-{}", std::process::id()));
+      let log = dir.join("hiss.log");
+      let old = dir.join("hiss.log.1");
+      let mut file = open(&log).unwrap();
+      file.write_all(b"0123456789").unwrap();
+      rotate(&log, 10);
+      assert!(log.exists() && !old.exists());
+      file.write_all(b"!").unwrap();
+      rotate(&log, 10);
+      assert!(!log.exists() && fs::read(&old).unwrap().len() == 11);
+      let _ = fs::remove_dir_all(&dir);
    }
 
    #[test]
