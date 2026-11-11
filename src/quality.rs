@@ -83,8 +83,30 @@ fn in_docstring(before: &str) -> bool {
    (before.matches("\"\"\"").count() + before.matches("\'\'\'").count()) % 2 == 1
 }
 
-/// Languages written in prose, where a sentence is the content.
-const PROSE_LANGUAGES: [&str; 6] = ["", "text", "markdown", "plaintext", "git-commit", "mail"];
+/// Languages written in prose, where a sentence is the content, as Helix
+/// names them (`languages.toml` in the fork). An empty name is a buffer
+/// Helix gives no language.
+const PROSE_LANGUAGES: [&str; 19] = [
+   "",
+   "text",
+   "markdown",
+   "markdoc",
+   "djot",
+   "rst",
+   "org",
+   "latex",
+   "typst",
+   "wikitext",
+   "gemini",
+   "quarto",
+   "rmarkdown",
+   "todotxt",
+   "mail",
+   "git-commit",
+   "git-notes",
+   "git-rebase",
+   "jjdescription",
+];
 
 /// Whether the prose guard applies at this cursor: not in a prose file, a
 /// comment, a string or a docstring, judged from the text before the cursor.
@@ -245,6 +267,21 @@ pub fn first_column_problem(text: &str, back: usize, indent: &Indent) -> Option<
 #[cfg(test)]
 mod tests {
    use super::*;
+
+   #[test]
+   fn prose_files_keep_their_sentences() {
+      for language in [
+         "jjdescription",
+         "git-commit",
+         "latex",
+         "typst",
+         "markdown",
+         "",
+      ] {
+         assert!(!prose_applies("Notes\n", language), "{language}");
+      }
+      assert!(prose_applies("fn f() {\n   ", "rust"));
+   }
 
    #[test]
    fn a_first_line_off_the_unit_is_seen() {
