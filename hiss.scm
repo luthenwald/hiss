@@ -321,7 +321,7 @@
 (define edit-commands
    '("insert_newline" "delete_char_backward" "delete_char_forward"
      "delete_word_backward" "delete_word_forward" "kill_to_line_start"
-     "kill_to_line_end" "insert_tab" "smart_tab"))
+     "kill_to_line_end" "insert_tab" "smart_tab" "insert_register"))
 
 ;; A command outside insert mode often comes shortly before an edit, so it
 ;; lets libhiss open the connection again if the API has been left alone
