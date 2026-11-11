@@ -46,7 +46,27 @@ fn version() -> Result<String, String> {
    guarded("hiss-version", || env!("CARGO_PKG_VERSION").to_string())
 }
 
+/// Where a panic happened, as `clean.rs:140`: the file's name and the line.
+fn panic_place(file: &str, line: u32) -> String {
+   let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+   format!("{name}:{line}")
+}
+
+/// Sends panics to the log. The default hook prints to stderr, over the
+/// editor's screen, even when the panic is caught. Only the place is kept,
+/// since a panic's message can quote the text it failed on. libhiss links
+/// its own copy of std, so Helix's hook is not replaced.
+fn quiet_panics() {
+   std::panic::set_hook(Box::new(|info| {
+      let place = info
+         .location()
+         .map_or("-".into(), |at| panic_place(at.file(), at.line()));
+      log::write(&format!("panic at={place}"));
+   }));
+}
+
 fn create_module() -> FFIModule {
+   quiet_panics();
    let _ = guarded("config", || log::set_on(config::config().log));
    ffi::warm_up();
    let mut module = FFIModule::new("hiss/native");
@@ -67,3 +87,17 @@ fn create_module() -> FFIModule {
 }
 
 declare_module!(create_module);
+
+#[cfg(test)]
+mod tests {
+   use super::*;
+
+   #[test]
+   fn a_panic_is_named_by_file_and_line() {
+      assert_eq!(panic_place("src/clean.rs", 140), "clean.rs:140");
+      assert_eq!(
+         panic_place("/home/someone/.cargo/registry/src/x/lib.rs", 7),
+         "lib.rs:7"
+      );
+   }
+}
