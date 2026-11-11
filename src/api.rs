@@ -411,8 +411,8 @@ fn word_note(word: &str) -> String {
 pub fn body(request: &Request, settings: &Settings) -> Value {
    let prefix = clean::tail_lines(&request.prefix, settings.prefix_chars);
    let suffix = clean::head_lines(&request.suffix, settings.suffix_chars);
-   let path = request.path.replace('"', "&quot;");
-   let language = request.language.replace('"', "&quot;");
+   let path = attribute(&request.path);
+   let language = attribute(&request.language);
    let indent = clean::indent_of(prefix)
       .unit
       .map(|unit| format!(" indent=\"{unit}\""))
@@ -444,6 +444,17 @@ pub fn body(request: &Request, settings: &Settings) -> Value {
       "system": [{ "type": "text", "text": SYSTEM }],
       "messages": [{ "role": "user", "content": content }],
    })
+}
+
+/// `text` as it may stand between the quotes of an attribute of the file
+/// tag: markup escaped, and on one line.
+fn attribute(text: &str) -> String {
+   text
+      .replace('&', "&amp;")
+      .replace('<', "&lt;")
+      .replace('>', "&gt;")
+      .replace('"', "&quot;")
+      .replace(['\n', '\r'], " ")
 }
 
 /// Where the cached part of the file ends: the last line start at least
@@ -482,6 +493,15 @@ mod tests {
          messages.last().unwrap()["content"],
          "<file path=\"src/&quot;main&quot;.rs\" lang=\"rust\" indent=\"3 spaces\">\nfn main() {\n   let x = <CURSOR/>;\n}\n\n</file>"
       );
+   }
+
+   #[test]
+   fn the_file_tag_escapes_its_attributes() {
+      assert_eq!(
+         attribute("a<b>&\"c\"\nd.rs"),
+         "a&lt;b&gt;&amp;&quot;c&quot; d.rs"
+      );
+      assert_eq!(attribute("src/main.rs"), "src/main.rs");
    }
 
    #[test]
