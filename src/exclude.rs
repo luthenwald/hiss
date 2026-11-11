@@ -1,17 +1,19 @@
 //! Files hiss never sends: those that commonly hold secrets, by Helix's
 //! language name or by file name, and whatever the `exclude` setting adds.
 //!
-//! A pattern without a slash matches the file name, one with a slash the
-//! whole path (`~/` stands for the home folder). `*` matches any run of
-//! characters, `?` one.
+//! A pattern without a slash matches the file name. One with a slash matches
+//! the path: the whole of it when it starts with `/` or `~/` (the home
+//! folder), else its end, so `secrets/*` holds in any folder. `*` matches any
+//! run of characters, `?` one, and letters match in either case, as file
+//! names do on macOS.
 
 use std::path::Path;
 
 /// Languages Helix gives to files of secrets and system accounts.
 const LANGUAGES: [&str; 5] = ["env", "pem", "passwd", "hosts", "ssh_client_config"];
 
-/// File names of keys, tokens and passwords.
-const NAMES: [&str; 18] = [
+/// Files of keys, tokens and passwords.
+const NAMES: [&str; 28] = [
    ".env",
    ".env.*",
    "*.env",
@@ -30,6 +32,16 @@ const NAMES: [&str; 18] = [
    ".git-credentials",
    "credentials",
    "*credentials.json",
+   ".my.cnf",
+   "secrets.yml",
+   "secrets.yaml",
+   "secrets.json",
+   "secrets.toml",
+   "*.tfvars",
+   "*.tfstate",
+   "*.tfstate.*",
+   ".kube/config",
+   "gh/hosts.yml",
 ];
 
 /// Whether the buffer at `path` (absolute, or empty for a scratch buffer)
@@ -45,17 +57,18 @@ pub fn excluded(path: &str, language: &str, extra: &[String], home: Option<&str>
       Some(rest) => {
          home.is_some_and(|home| glob(&format!("{}/{rest}", home.trim_end_matches('/')), path))
       }
-      None if pattern.contains('/') => glob(pattern, path),
+      None if pattern.starts_with('/') => glob(pattern, path),
+      None if pattern.contains('/') => glob(&format!("*/{pattern}"), path),
       None => glob(pattern, name),
    };
    NAMES.iter().copied().any(matches) || extra.iter().any(|pattern| matches(pattern))
 }
 
 /// Whether `text` matches `pattern` as a whole, `*` standing for any run of
-/// characters and `?` for one.
+/// characters and `?` for one, letters in either case.
 fn glob(pattern: &str, text: &str) -> bool {
-   let pattern: Vec<char> = pattern.chars().collect();
-   let text: Vec<char> = text.chars().collect();
+   let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+   let text: Vec<char> = text.to_lowercase().chars().collect();
    // The classic two-pointer match, going back to the last star on a miss.
    let (mut p, mut t) = (0, 0);
    let mut star: Option<(usize, usize)> = None;
@@ -109,6 +122,13 @@ mod tests {
          "/h/.netrc",
          "/h/.aws/credentials",
          "/p/tls/server.key",
+         "/p/.ENV",
+         "/p/tls/Server.PEM",
+         "/h/.kube/config",
+         "/h/.config/gh/hosts.yml",
+         "/p/infra/prod.tfvars",
+         "/p/infra/terraform.tfstate.backup",
+         "/p/config/secrets.yaml",
       ] {
          assert!(excluded(path, "", none, None), "{path}");
       }
@@ -119,6 +139,9 @@ mod tests {
          "/p/identity.py",
          "",
          "/p/keys.rs",
+         "/p/src/secrets.rs",
+         "/p/src/config",
+         "/p/hosts.yml",
       ] {
          assert!(!excluded(path, "rust", none, None), "{path}");
       }
@@ -130,6 +153,7 @@ mod tests {
          "*.secret".to_string(),
          "~/notes/*".to_string(),
          "/srv/*/conf.toml".to_string(),
+         "private/*".to_string(),
       ];
       let home = Some("/h");
       assert!(excluded("/p/a.secret", "", &extra, home));
@@ -137,5 +161,12 @@ mod tests {
       assert!(!excluded("/h/code/diary.md", "markdown", &extra, home));
       assert!(excluded("/srv/app/conf.toml", "toml", &extra, home));
       assert!(!excluded("/h/notes/diary.md", "markdown", &extra, None));
+      assert!(excluded("/p/private/plan.md", "markdown", &extra, home));
+      assert!(!excluded(
+         "/p/not-private/plan.md",
+         "markdown",
+         &extra,
+         home
+      ));
    }
 }

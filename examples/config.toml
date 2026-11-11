@@ -28,6 +28,7 @@ context_after = 2000
 
 # Files never sent, besides those that usually hold secrets (.env, key files,
 # ~/.netrc and the like). Patterns are split by commas: one without a slash
-# matches the file name, one with a slash the whole path, and ~/ stands for
-# the home folder. For example "*.secret, ~/notes/*".
+# matches the file name, and one with a slash the path: all of it when it
+# starts with / or ~/ (the home folder), else its end. Letters match in
+# either case. For example "*.secret, ~/notes/*, private/*".
 exclude = ""

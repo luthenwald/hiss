@@ -63,7 +63,7 @@ hiss remembers its last 64 suggestions while the editor runs. When an undo or a 
 
 Each request carries the text around the cursor (up to `context_before` characters before it and `context_after` after it, cut at line ends), the file's path relative to Helix's working directory (or only its name when the file lies outside it), and the language. It goes to the Anthropic API under your key and is billed to it; see [Anthropic's pricing](https://www.anthropic.com/pricing) for the model you use. Nothing else leaves your machine.
 
-Some files are never sent, since they usually hold secrets: `.env` and `.env.*`, `.envrc`, `*.pem` and `*.key`, SSH keys (`id_rsa*`, `id_ed25519*` and the like), `.netrc`, `.npmrc`, `.pypirc`, `.pgpass`, `.htpasswd`, `.git-credentials`, `credentials` and `*credentials.json`, and buffers Helix reads as `env`, `pem`, `passwd`, `hosts` or `ssh_client_config`. The `exclude` setting adds patterns of your own. In such a file hiss stays quiet, and `:hiss-try` says the file is never sent.
+Some files are never sent, since they usually hold secrets: `.env` and `.env.*`, `.envrc`, `*.pem` and `*.key`, SSH keys (`id_rsa*`, `id_ed25519*` and the like), `.netrc`, `.npmrc`, `.pypirc`, `.pgpass`, `.htpasswd`, `.git-credentials`, `.my.cnf`, `credentials` and `*credentials.json`, `secrets.yml` and its `.yaml`, `.json` and `.toml` forms, Terraform's `*.tfvars` and `*.tfstate`, `.kube/config`, `gh/hosts.yml`, and buffers Helix reads as `env`, `pem`, `passwd`, `hosts` or `ssh_client_config`. The `exclude` setting adds patterns of your own. In such a file hiss stays quiet, and `:hiss-try` says the file is never sent.
 
 hiss asks only after a pause, and drops a request as soon as you type on, so most requests stop early; a dropped request may still be billed for what it sent. In a ten-minute session of ordinary editing, with a 150 ms pause, hiss sent about 200 requests, and one suggestion in ten was taken. At the median, a request sent about 440 tokens and got about 15 back.
 
@@ -82,7 +82,7 @@ Settings live in `~/.config/hiss/config.toml` (under `$XDG_CONFIG_HOME` when tha
 | `max_tokens` | `96` | the most tokens one suggestion may use |
 | `context_before` | `8000` | characters of the file sent before the cursor |
 | `context_after` | `2000` | characters sent after it |
-| `exclude` | `""` | more files never to send, as patterns split by commas: `*.secret` matches a file name, `~/notes/*` a path |
+| `exclude` | `""` | more files never to send, as patterns split by commas: `*.secret` matches a file name, `~/notes/*` a path from home, `private/*` that folder anywhere; letters match in either case |
 
 hiss reads the file when the editor starts. A line it cannot read keeps its default, and the status line says which line it was.
 
