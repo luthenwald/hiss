@@ -4,6 +4,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use reqwest::header::HeaderValue;
 use serde_json::{Value, json};
 
 use crate::clean;
@@ -125,13 +126,19 @@ fn api_key() -> Option<String> {
 
 pub struct Client {
    http: reqwest::Client,
-   key: String,
+   /// Marked sensitive, so that no debug output shows it.
+   key: HeaderValue,
 }
 
 impl Client {
    pub fn from_env() -> Result<Client, String> {
-      let key = api_key().ok_or("hiss: no api key")?;
+      let mut key = HeaderValue::from_str(&api_key().ok_or("hiss: no api key")?)
+         .map_err(|_| "hiss: the api key has characters a header cannot hold")?;
+      key.set_sensitive(true);
+      // No redirects: reqwest keeps custom headers such as `x-api-key` on a
+      // redirect to another host, so one would hand the key to that host.
       let http = reqwest::Client::builder()
+         .redirect(reqwest::redirect::Policy::none())
          .connect_timeout(Duration::from_secs(5))
          .read_timeout(Duration::from_secs(20))
          .pool_idle_timeout(Duration::from_secs(600))
@@ -144,11 +151,9 @@ impl Client {
       Ok(Client { http, key })
    }
 
-   fn post(&self, url: &str) -> reqwest::RequestBuilder {
-      self
-         .http
-         .post(url)
-         .header("x-api-key", &self.key)
+   fn signed(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+      request
+         .header("x-api-key", self.key.clone())
          .header("anthropic-version", VERSION)
    }
 
@@ -157,10 +162,7 @@ impl Client {
    pub async fn warm(&self) -> Result<Duration, String> {
       let start = Instant::now();
       let response = self
-         .http
-         .get(MODELS)
-         .header("x-api-key", &self.key)
-         .header("anthropic-version", VERSION)
+         .signed(self.http.get(MODELS))
          .send()
          .await
          .map_err(|e| format!("hiss: {e}"))?;
@@ -248,7 +250,7 @@ impl Client {
       on_text: &mut impl FnMut(&str, usize),
    ) -> Result<Reply, Failure> {
       let mut response = self
-         .post(MESSAGES)
+         .signed(self.http.post(MESSAGES))
          .header("content-type", "application/json")
          .body(body.to_string())
          .send()
