@@ -57,6 +57,7 @@ fn create_module() -> FFIModule {
       .register_fn("hiss-cancel!", ffi::cancel)
       .register_fn("hiss-cached", ffi::cached_ghost)
       .register_fn("hiss-resume!", ffi::resume)
+      .register_fn("hiss-warm!", ffi::warm_again)
       .register_fn("hiss-accepted!", ffi::accepted)
       .register_fn("hiss-config", ffi::config_value)
       .register_fn("hiss-config-problem", ffi::config_problem)

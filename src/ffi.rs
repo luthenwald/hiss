@@ -44,6 +44,21 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::new(cache::CAPACITY)));
 static HALTED: AtomicBool = AtomicBool::new(false);
 
+/// When libhiss last turned to the API (a request or a warm-up started).
+static CONTACT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// How long the API may be left alone before `hiss-warm!` warms again. The
+/// pool drops an idle connection after ten minutes, and the far end may do
+/// so sooner; a warm-up over a live connection costs one round trip.
+const QUIET: Duration = Duration::from_secs(60);
+
+fn contact() -> Option<Instant> {
+   CONTACT
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .replace(Instant::now())
+}
+
 /// Keeps `failure` for the status line, and halts the automatic requests
 /// when it would come back with every one of them.
 fn failed(failure: Failure) {
@@ -133,6 +148,7 @@ fn requests<T>(f: impl FnOnce(&mut HashMap<usize, Entry>) -> T) -> T {
 pub fn warm_up() {
    let _ = guarded("warm-up", || {
       if let Ok(client) = CLIENT.as_ref() {
+         contact();
          let client = Arc::clone(client);
          RUNTIME.spawn(async move {
             match client.warm(&config::config().request.model).await {
@@ -145,6 +161,23 @@ pub fn warm_up() {
          });
       }
    });
+}
+
+/// `(hiss-warm!)`: opens the connection again when the API has been left
+/// alone for a while, so that the next request does not pay for it. Says
+/// whether it did.
+pub fn warm_again() -> Result<bool, String> {
+   guarded("hiss-warm!", || {
+      let quiet = CONTACT
+         .lock()
+         .unwrap_or_else(|e| e.into_inner())
+         .is_none_or(|last| last.elapsed() >= QUIET);
+      let warm = quiet && !HALTED.load(Ordering::Relaxed);
+      if warm {
+         warm_up();
+      }
+      warm
+   })
 }
 
 /// `(hiss-start! prefix suffix language path auto)`: the new request's id,
@@ -179,6 +212,7 @@ pub fn start(
             return None;
          }
       };
+      contact();
       let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
       let (sender, receiver) = watch::channel((0, String::new()));
       let settings = config::config().request.clone();

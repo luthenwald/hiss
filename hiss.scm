@@ -16,7 +16,7 @@
 
 (#%require-dylib "libhiss"
    (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-cached hiss-error
-                               hiss-timing hiss-accepted! hiss-resume! hiss-config
+                               hiss-timing hiss-accepted! hiss-resume! hiss-warm! hiss-config
                                hiss-config-problem)))
 
 (provide hiss-on
@@ -274,11 +274,16 @@
      "delete_word_backward" "delete_word_forward" "kill_to_line_start"
      "kill_to_line_end" "insert_tab" "smart_tab"))
 
+;; A command outside insert mode often comes shortly before an edit, so it
+;; lets libhiss open the connection again if the API has been left alone
+;; for a while (`hiss-warm!` does nothing otherwise).
 (define (on-command name)
    (unless (starts-with? name "hiss")
       (clear!)
       (when (member name edit-commands)
-         (schedule! debounce-ms))))
+         (schedule! debounce-ms))
+      (when (and enabled (not (adapter.insert-mode?)))
+         (native.hiss-warm!))))
 
 (define (on-mode-switch event)
    (clear!)
