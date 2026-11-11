@@ -130,12 +130,20 @@ impl fmt::Display for Timing {
    }
 }
 
-/// The key from `HISS_ANTHROPIC_API_KEY`, else `ANTHROPIC_API_KEY`.
+/// The key from `HISS_ANTHROPIC_API_KEY`, else `ANTHROPIC_API_KEY`, without
+/// the spaces or the line break a shell may have left around it.
 fn api_key() -> Option<String> {
-   ["HISS_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]
-      .iter()
-      .filter_map(|name| std::env::var(name).ok())
-      .find(|key| !key.trim().is_empty())
+   first_key(
+      ["HISS_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]
+         .iter()
+         .filter_map(|name| std::env::var(name).ok()),
+   )
+}
+
+fn first_key(values: impl Iterator<Item = String>) -> Option<String> {
+   values
+      .map(|key| key.trim().to_string())
+      .find(|key| !key.is_empty())
 }
 
 pub struct Client {
@@ -559,6 +567,13 @@ mod tests {
       let busy = Failure::refused(529, "");
       assert!(busy.transient && !busy.lasting);
       assert!(!Failure::refused(429, "").lasting);
+   }
+
+   #[test]
+   fn the_key_is_trimmed() {
+      let keys = |values: &[&str]| first_key(values.iter().map(|v| v.to_string()));
+      assert_eq!(keys(&["  ", "sk-abc\n"]).as_deref(), Some("sk-abc"));
+      assert_eq!(keys(&["", " "]), None);
    }
 
    #[test]
