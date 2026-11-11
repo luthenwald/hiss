@@ -25,3 +25,9 @@ max_tokens = 96
 # How many characters of the file to send before and after the cursor.
 context_before = 8000
 context_after = 2000
+
+# Files never sent, besides those that usually hold secrets (.env, key files,
+# ~/.netrc and the like). Patterns are split by commas: one without a slash
+# matches the file name, one with a slash the whole path, and ~/ stands for
+# the home folder. For example "*.secret, ~/notes/*".
+exclude = ""

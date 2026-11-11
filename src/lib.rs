@@ -14,6 +14,7 @@ pub mod api;
 pub mod cache;
 pub mod clean;
 pub mod config;
+pub mod exclude;
 mod ffi;
 mod log;
 pub mod quality;

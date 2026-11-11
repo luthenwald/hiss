@@ -30,7 +30,7 @@ use tokio::sync::watch;
 
 use crate::api::{Client, Failure, Request, Timing};
 use crate::cache::{self, Cache, Ghost, Key};
-use crate::{RUNTIME, config, guarded, log};
+use crate::{RUNTIME, config, exclude, guarded, log};
 
 struct Entry {
    text: Arc<tokio::sync::Mutex<watch::Receiver<(usize, String)>>>,
@@ -55,6 +55,12 @@ fn failed(failure: Failure) {
 
 fn cached<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
    f(&mut CACHE.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Whether the buffer at `path` in `language` must not be sent (`exclude`).
+fn excluded(path: &str, language: &str) -> bool {
+   let home = std::env::var("HOME").ok();
+   exclude::excluded(path, language, &config::config().exclude, home.as_deref())
 }
 
 /// The request the editor's text makes, cut to the window that is sent.
@@ -155,6 +161,12 @@ pub fn start(
       if auto && HALTED.load(Ordering::Relaxed) {
          return None;
       }
+      if excluded(&path, &language) {
+         if !auto {
+            with_last(|last| last.error = Some("hiss: this file is never sent".into()));
+         }
+         return None;
+      }
       HALTED.store(false, Ordering::Relaxed);
       let client = match CLIENT.as_ref() {
          Ok(client) => Arc::clone(client),
@@ -245,6 +257,9 @@ fn steel_future(future: impl Future<Output = FFIValue> + Send + 'static) -> FFIV
 /// request made for the same text, as `(back text)`, or `#f`.
 pub fn cached_ghost(prefix: String, suffix: String, language: String, path: String) -> FFIValue {
    guarded("hiss-cached", || {
+      if excluded(&path, &language) {
+         return FFIValue::BoolV(false);
+      }
       let request = request(prefix, suffix, language, &path);
       let ghost = cached(|cache| cache.get(key(&request)));
       match ghost {

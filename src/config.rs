@@ -20,6 +20,8 @@ pub struct Config {
    /// Milliseconds to wait after an edit before asking.
    pub debounce: u64,
    pub log: bool,
+   /// Patterns of files never sent, besides the built-in ones (`exclude`).
+   pub exclude: Vec<String>,
    pub request: Settings,
 }
 
@@ -29,6 +31,7 @@ impl Default for Config {
          enabled: true,
          debounce: 250,
          log: true,
+         exclude: Vec::new(),
          request: Settings::default(),
       }
    }
@@ -152,6 +155,17 @@ fn set(config: &mut Config, key: &str, value: Value) -> Result<(), String> {
       "max_tokens" => request.max_tokens = int(&value, 8, 1_024)? as u32,
       "context_before" => request.prefix_chars = int(&value, 0, 100_000)? as usize,
       "context_after" => request.suffix_chars = int(&value, 0, 100_000)? as usize,
+      "exclude" => match value {
+         Value::Text(list) => {
+            config.exclude = list
+               .split(',')
+               .map(str::trim)
+               .filter(|pattern| !pattern.is_empty())
+               .map(String::from)
+               .collect()
+         }
+         _ => return Err("`exclude` takes patterns in quotes, split by commas".into()),
+      },
       "model" => match value {
          Value::Text(model) if is_model_name(&model) => request.model = model,
          _ => return Err("`model` takes a model name in quotes".into()),
@@ -191,6 +205,8 @@ mod tests {
       assert_eq!(config.debounce, 1_000);
       assert_eq!(config.request.model, "claude-sonnet-5-5");
       assert_eq!(config.request.retries, 0);
+      let (config, _) = parse("exclude = \"*.secret, ~/notes/* ,\"");
+      assert_eq!(config.exclude, ["*.secret", "~/notes/*"]);
    }
 
    #[test]
