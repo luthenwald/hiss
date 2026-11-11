@@ -236,9 +236,15 @@ pub fn warm_up() {
                   backoff(|b| *b = Backoff::default());
                   log::write(&format!("warm after={}", took.as_millis()));
                }
+               // The warm-up asks about the model, not for a completion,
+               // so only a refused key says that completions would be
+               // refused as well. Anything else is logged and left to the
+               // first request to report.
                Err(failure) => {
                   log::write(&format!("warm error {}", log::word(&failure.message)));
-                  failed(failure);
+                  if failure.transient || failure.status == Some(401) {
+                     failed(failure);
+                  }
                }
             }
          });
@@ -294,6 +300,7 @@ pub fn start(
                message: error.clone(),
                transient: false,
                lasting: true,
+               status: None,
             });
             return None;
          }

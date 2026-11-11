@@ -351,6 +351,7 @@ impl Client {
                         .iter()
                         .any(|kind| text.to_lowercase().contains(kind)),
                      lasting: false,
+                     status: None,
                      message: format!("hiss: api error: {text}"),
                   });
                }
@@ -386,6 +387,8 @@ impl Client {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
    pub message: String,
+   /// The HTTP status, when the API answered with one.
+   pub status: Option<u16>,
    pub transient: bool,
    pub lasting: bool,
 }
@@ -399,6 +402,7 @@ impl Failure {
          message: format!("hiss: {}", with_cause(&error.without_url())),
          transient,
          lasting: false,
+         status: None,
       }
    }
 
@@ -412,6 +416,7 @@ impl Failure {
          ),
          transient: code == 429 || code >= 500,
          lasting: matches!(code, 400 | 401 | 403 | 404),
+         status: Some(code),
       }
    }
 }
