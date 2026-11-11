@@ -171,17 +171,30 @@ fn chars(text: &str) -> usize {
 
 /// The path a request names: relative to the working directory (Helix's,
 /// usually the project) when the file is under it, else the file name alone,
-/// so that no home folder or user name leaves the machine.
-fn shown_path(path: &str, cwd: Option<&Path>) -> String {
+/// so that no home folder or user name leaves the machine. A working
+/// directory above the home folder (`/`, `/Users`) would put that name
+/// back in, so a file under home is then shown from home.
+fn shown_path(path: &str, cwd: Option<&Path>, home: Option<&Path>) -> String {
    let path = Path::new(path);
-   cwd.and_then(|cwd| path.strip_prefix(cwd).ok())
+   let above_home = |cwd: &&Path| home.is_some_and(|home| home != *cwd && home.starts_with(cwd));
+   let base = match (cwd.filter(above_home), home) {
+      (Some(_), Some(home)) if path.starts_with(home) => Some(home),
+      _ => cwd,
+   };
+   base
+      .and_then(|base| path.strip_prefix(base).ok())
       .filter(|relative| !relative.as_os_str().is_empty())
       .or_else(|| path.file_name().map(Path::new))
       .map_or(String::new(), |shown| shown.to_string_lossy().into_owned())
 }
 
 fn shown(path: &str) -> String {
-   shown_path(path, std::env::current_dir().ok().as_deref())
+   let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+   shown_path(
+      path,
+      std::env::current_dir().ok().as_deref(),
+      home.as_deref(),
+   )
 }
 
 /// A ghost as Steel sees it: `(back text)`.
@@ -534,17 +547,26 @@ mod tests {
 
    #[test]
    fn paths_are_shown_from_the_working_directory() {
-      let cwd = Some(Path::new("/home/someone/project"));
-      assert_eq!(
-         shown_path("/home/someone/project/src/a.rs", cwd),
-         "src/a.rs"
-      );
-      assert_eq!(shown_path("/home/someone/project/a.rs", cwd), "a.rs");
-      assert_eq!(shown_path("/home/someone/notes/b.md", cwd), "b.md");
-      assert_eq!(shown_path("/home/someone/notes/b.md", None), "b.md");
-      assert_eq!(shown_path("", cwd), "");
+      let home = Some(Path::new("/home/someone"));
+      let shown = |path, cwd: Option<&str>| shown_path(path, cwd.map(Path::new), home);
+      let cwd = Some("/home/someone/project");
+      assert_eq!(shown("/home/someone/project/src/a.rs", cwd), "src/a.rs");
+      assert_eq!(shown("/home/someone/project/a.rs", cwd), "a.rs");
+      assert_eq!(shown("/home/someone/notes/b.md", cwd), "b.md");
+      assert_eq!(shown("/home/someone/notes/b.md", None), "b.md");
+      assert_eq!(shown("", cwd), "");
       // A buffer named after the directory itself still shows a name.
-      assert_eq!(shown_path("/home/someone/project", cwd), "project");
+      assert_eq!(shown("/home/someone/project", cwd), "project");
+   }
+
+   #[test]
+   fn a_working_directory_above_home_does_not_show_the_home_folder() {
+      let home = Some(Path::new("/home/someone"));
+      let shown = |path, cwd| shown_path(path, Some(Path::new(cwd)), home);
+      assert_eq!(shown("/home/someone/project/a.rs", "/"), "project/a.rs");
+      assert_eq!(shown("/home/someone/project/a.rs", "/home"), "project/a.rs");
+      assert_eq!(shown("/home/someone/a.rs", "/home/someone"), "a.rs");
+      assert_eq!(shown("/etc/hosts.allow", "/"), "etc/hosts.allow");
    }
 
    #[test]
