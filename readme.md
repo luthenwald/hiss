@@ -4,25 +4,89 @@ Grey ghost text for Helix, from Claude. While you type in insert mode, hiss asks
 
 It comes in two halves. `hiss.scm` is a Steel module that watches the keys and draws the suggestion. `libhiss` is a small Rust library, loaded by Steel, that keeps one connection to the API open and streams the answer back, so a suggestion can start to appear while you are still pausing.
 
-## Requirements
-
-- Helix with the Steel plugin system: the fork at [mattwparas/helix](https://github.com/mattwparas/helix), branch `steel-event-system`. Its `STEEL.md` explains how to build it; in a clone of the fork on that branch, `cargo xtask steel` installs `hx` with Steel built in. Upstream Helix has no plugin system and cannot run hiss.
-- Rust, to build the library.
-- An Anthropic API key in `HISS_ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY`, set in the environment Helix starts from.
-
-The library has to be built against the same versions of `steel-core`, `abi_stable` and `async-ffi` as the editor, or Steel cannot load it. hiss pins them in `Cargo.toml` to what the fork used at revision 424add10. If you run a newer fork, copy the versions from the fork's `Cargo.lock` into `Cargo.toml` and build again.
-
 ## Installing
 
-From a clone of this repository:
+hiss runs in a build of Helix with the Steel plugin system, which lives in a fork of Helix. Upstream Helix has no plugin system and cannot run hiss. The steps below install the fork as `hx`, then hiss into it.
+
+### What you need
+
+- Rust, installed through [rustup](https://rustup.rs).
+- git and a C compiler, which Helix uses to build its tree-sitter grammars. On macOS, `xcode-select --install` brings both. On Linux, install `git` and `gcc` or `clang` from your package manager.
+- An Anthropic API key, described below.
+- python3, if you have it. The install script uses it to check that the library loads before it copies it.
+
+### Helix with Steel
+
+The fork is [mattwparas/helix](https://github.com/mattwparas/helix), on the branch `steel-event-system`. Clone it, check out the revision hiss was built against, and install it:
 
 ```sh
+git clone --depth 1 --branch steel-event-system https://github.com/mattwparas/helix.git
+cd helix
+git checkout 424add10
+cargo install --path helix-term --features steel,git --locked
+```
+
+The first build installs the Rust version the fork asks for, then fetches and compiles the grammars, and takes several minutes. It puts `hx` in `~/.cargo/bin`, which should come before any other `hx` on your `PATH`.
+
+Helix finds its themes, grammars and queries in the clone's `runtime/` folder, named by `HELIX_RUNTIME`. Set it to that folder's full path (`pwd` in the clone shows where it is) in your shell's profile, `~/.zshrc` or `~/.bashrc`:
+
+```sh
+export HELIX_RUNTIME=/path/to/helix/runtime
+```
+
+or, for fish, in `~/.config/fish/config.fish`:
+
+```fish
+set -gx HELIX_RUNTIME /path/to/helix/runtime
+```
+
+In a new shell, `hx --version` should end in `(424add10)`, and `hx --health` should list the clone's `runtime` folder among its runtime directories. The fork reads the same `~/.config/helix` as Helix, so your settings, themes and languages carry over.
+
+hiss is built against the versions of `steel-core`, `abi_stable` and `async-ffi` that this revision of the fork uses, and Steel loads it only when they match. A newer revision of the fork may need new versions in hiss; see [Updating](#updating). The fork's `STEEL.md` suggests `cargo xtask steel` in place of `cargo install`. That also installs the Steel tools from Steel's newest revision, which hiss does not need.
+
+To keep another Helix as `hx`, build the fork in its clone without installing it:
+
+```sh
+cargo build --release -p helix-term --features steel,git --locked
+```
+
+Then start it through a small script on your `PATH`, such as `~/.local/bin/hx-steel`, and leave `HELIX_RUNTIME` out of your profile:
+
+```sh
+#!/bin/sh
+export HELIX_RUNTIME=/path/to/helix/runtime
+exec /path/to/helix/target/release/hx "$@"
+```
+
+Make it executable with `chmod +x ~/.local/bin/hx-steel`. Your other `hx` stays as it was, and since plain Helix ignores `init.scm`, both can share `~/.config/helix`.
+
+### hiss
+
+```sh
+git clone --depth 1 --branch main https://github.com/luthenwald/hiss.git
+cd hiss
 ./install.sh
 ```
 
-It builds the library, checks that it loads, and copies it to Steel's `native/` folder, with the Steel module in `cogs/hiss/`. Steel's home is `$STEEL_HOME` when that is set, else `~/.steel` when it exists, else `~/.local/share/steel`. The script prints every path it writes.
+The script builds the library, checks that it loads, and copies it to Steel's `native/` folder, with the Steel module in `cogs/hiss/`. Steel's home is `$STEEL_HOME` when that is set, else `~/.steel` when it exists, else `~/.local/share/steel`. The script prints every path it writes.
 
-Then add this to `~/.config/helix/init.scm`:
+### The API key
+
+Make a key in the [Claude Console](https://platform.claude.com/settings/keys) and put it in the environment Helix starts from, in the same profile as before:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+```fish
+set -gx ANTHROPIC_API_KEY sk-ant-...
+```
+
+hiss reads `HISS_ANTHROPIC_API_KEY` first, so you can give it a key of its own and leave `ANTHROPIC_API_KEY` to other tools. Requests are billed to the key; see [What hiss sends](#what-hiss-sends).
+
+### Loading hiss
+
+Add this to `~/.config/helix/init.scm`, and create the file if it does not exist:
 
 ```scheme
 (require "helix/keymaps.scm")
@@ -34,7 +98,7 @@ Then add this to `~/.config/helix/init.scm`:
             "C-space" ":hiss-try")))
 ```
 
-The library loads once per editor, so restart Helix after installing a new build.
+### The ghost's color
 
 The suggestion is drawn as an inlay hint, so it takes the color of your theme's `ui.virtual.inlay-hint` scope. If your theme leaves that scope unset, the ghost looks like ordinary text. A small theme that inherits yours fixes it:
 
@@ -45,6 +109,10 @@ inherits = "base16_terminal"
 ```
 
 Then set `theme = "base16_terminal_hiss"` in Helix's `config.toml`.
+
+### Checking it works
+
+Start a new shell, so that it has the key and `HELIX_RUNTIME`, open a source file with `hx`, press `i` and pause. A grey suggestion appears after the cursor, usually within a second, and tab takes it. If nothing appears, run `:hiss-try`: the status line shows how long the answer took, or what went wrong. [When something is wrong](#when-something-is-wrong) lists the usual causes.
 
 ## Using it
 
@@ -96,8 +164,21 @@ hiss writes one line per request to `~/.local/state/hiss/hiss.log` (under `$XDG_
 - Suggestions stopped after an error. When the API turns down every request in the same way, for a missing or wrong key or a `model` it does not know, hiss says so once and stops asking. Fix the cause, then run `:hiss-try` or `:hiss-on`, and hiss asks again.
 - Suggestions pause after `asking again in 30 s`. The network or the API failed twice in a row, so hiss waits before it asks by itself again, longer each time up to five minutes. `:hiss-try` and `:hiss-on` end the wait.
 - The suggestion looks like ordinary text. Your theme has no `ui.virtual.inlay-hint` color; see the end of Installing.
-- Helix stops at start after a fork update. The library no longer matches the editor; see Requirements for the versions to copy, then run `./install.sh` again.
+- Helix stops at start after a fork update. The library no longer matches the editor; see [Updating](#updating) for the versions to copy, then run `./install.sh` again.
 - The suggestion vanishes now and then. With `lsp.display-inlay-hints = true` in Helix's config, a language server's hints are redrawn from time to time, and the redraw can take the suggestion with it. hiss asks again after your next edit.
+
+## Updating
+
+To update hiss, pull in its clone and install again:
+
+```sh
+git pull
+./install.sh
+```
+
+Steel loads the library once per editor, so restart Helix afterwards.
+
+When you move the fork to a newer revision, build it again as in Installing. hiss then has to match the fork's new versions of `steel-core`, `abi_stable` and `async-ffi`: copy them from the fork's `Cargo.lock` into hiss's `Cargo.toml` (for `steel-core`, the git revision after the `#`), and run `./install.sh` again. With versions that do not match, Helix stops at start when Steel loads the library.
 
 ## Uninstalling
 
@@ -105,6 +186,7 @@ hiss writes one line per request to `~/.local/state/hiss/hiss.log` (under `$XDG_
 2. Remove the hiss lines from `~/.config/helix/init.scm`, and the theme you made for it, if any, from `~/.config/helix/themes/`. Set `theme` in Helix's `config.toml` back to your old theme.
 3. Remove the settings folder `~/.config/hiss/` and the log folder `~/.local/state/hiss/` (or the same folders under `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME`).
 4. Delete the clone of this repository; its `target/` folder holds the build.
+5. If you installed the fork only for hiss, run `cargo uninstall helix-term` (or delete the `hx-steel` script when you built it side by side), remove the `HELIX_RUNTIME` line from your shell's profile, and delete the fork's clone. The fork also writes `cogs/helix/` and `lsp/` into Steel's home; when nothing else uses Steel, the whole of Steel's home can go.
 
 Without the clone, on a default setup, the first and third steps are:
 
@@ -113,7 +195,7 @@ rm -f ~/.local/share/steel/native/libhiss.dylib
 rm -rf ~/.local/share/steel/cogs/hiss ~/.config/hiss ~/.local/state/hiss
 ```
 
-hiss keeps nothing else: the API key stays in your environment, and hiss writes no other files.
+hiss keeps nothing else and writes no other files. The API key stays in your shell's profile; remove its line there if you added it for hiss.
 
 ## License
 
