@@ -438,6 +438,17 @@ pub fn accepted(chars: usize) -> Result<bool, String> {
    })
 }
 
+/// `(hiss-held! matched chars)`: notes in the log how a request ended that
+/// was kept while the user typed `chars` more: its reply started with them
+/// (a hit), or it did not and was dropped (a miss).
+pub fn held(matched: bool, chars: usize) -> Result<bool, String> {
+   guarded("hiss-held!", || {
+      let how = if matched { "hit" } else { "miss" };
+      log::write(&format!("held {how} chars={chars}"));
+      true
+   })
+}
+
 /// `(hiss-config name)`: a setting `hiss.scm` needs itself, from
 /// `config.toml`: `"enabled"` (a boolean), `"debounce"` (milliseconds), or
 /// `"context_before"` and `"context_after"` (chars). Any other name gives

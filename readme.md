@@ -48,7 +48,7 @@ Then set `theme = "base16_terminal_hiss"` in Helix's `config.toml`.
 
 ## Using it
 
-hiss starts on. A short pause in insert mode brings a suggestion, over as many lines as it needs. After tab takes a suggestion, and when you enter insert mode, hiss asks right away without waiting for the pause. When you type what it shows, it shortens as you go; when you type something else, it goes away and hiss asks again after the next pause.
+hiss starts on. A short pause in insert mode brings a suggestion, over as many lines as it needs. After tab takes a suggestion, and when you enter insert mode, hiss asks right away without waiting for the pause. When you type what it shows, it shortens as you go, also when you typed ahead of a suggestion that was still on its way; when you type something else, it goes away and hiss asks again after the next pause.
 
 | command | what it does |
 |---|---|
@@ -88,7 +88,7 @@ hiss reads the file when the editor starts. A line it cannot read keeps its defa
 
 ## The log
 
-hiss writes one line per request to `~/.local/state/hiss/hiss.log` (under `$XDG_STATE_HOME` when that is set): how long the answer took, how many tokens it used, whether it was shown, cancelled, taken or remembered, and how much context was sent. The log never holds your code, file names or key. Once it passes 1 MB, hiss moves it to `hiss.log.1` in the same folder the next time Helix starts, replacing the older one. `log = false` turns it off.
+hiss writes one line per request to `~/.local/state/hiss/hiss.log` (under `$XDG_STATE_HOME` when that is set): how long the answer took, how many tokens it used, whether it was shown, cancelled, taken or remembered, whether a suggestion you typed ahead of still fitted, and how much context was sent. The log never holds your code, file names or key. Once it passes 1 MB, hiss moves it to `hiss.log.1` in the same folder the next time Helix starts, replacing the older one. `log = false` turns it off.
 
 ## When something is wrong
 

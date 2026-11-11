@@ -16,8 +16,8 @@
 
 (#%require-dylib "libhiss"
    (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-cached hiss-error
-                               hiss-timing hiss-accepted! hiss-resume! hiss-warm! hiss-config
-                               hiss-config-problem)))
+                               hiss-timing hiss-accepted! hiss-held! hiss-resume! hiss-warm!
+                               hiss-config hiss-config-problem)))
 
 (provide hiss-on
          hiss-off
@@ -194,16 +194,29 @@
 (define (context-at index)
    (adapter.text-around index context-before context-after))
 
-;; The request whose pieces may still be drawn; a counter that makes stale
-;; callbacks (older requests, older debounce timers) do nothing; where the
-;; request was made (the view and document, the char index, the document's
-;; length); and what has been typed through since.
+;; The request whose pieces may still be drawn; a counter that makes the
+;; callbacks of older requests do nothing; where the request was made (the
+;; view and document, the char index, the document's length); and what has
+;; been typed since, through a ghost or ahead of one.
 (define request-id #f)
 (define generation 0)
 (define request-place #f)
 (define request-length 0)
 (define origin 0)
 (define typed "")
+
+;; A request is held when the user typed on before it showed anything, or
+;; typed its ghost to the end while it still streams. Its reply is still
+;; right for the new text if it starts with what was typed, so it is kept
+;; rather than cancelled and asked for again: `impo` is usually followed by
+;; `r`, as the reply expects. `held` says that such a request's verdict is
+;; still out, for the log. `asks` makes older debounce timers do nothing.
+;; `want-ask` says that the debounce ran out while a request was held: the
+;; pause the user makes before a request has happened, so a reply that
+;; turns out wrong is followed by a new request at once.
+(define held #f)
+(define asks 0)
+(define want-ask #f)
 
 ;; Whether the text is still as the request left it, but for what was typed
 ;; through: its pieces are drawn only then (see `ghost-fits?`).
@@ -212,13 +225,32 @@
         (= (adapter.cursor) (+ origin (string-length typed)))
         (= (adapter.length) (+ request-length (string-length typed)))))
 
-(define (clear!)
+;; Cancels the request and removes the ghost, leaving a running debounce
+;; timer alone.
+(define (drop!)
    (set! generation (+ generation 1))
    (when request-id
       (native.hiss-cancel! request-id)
       (set! request-id #f))
    (set! typed "")
+   (set! held #f)
    (ghost-hide!))
+
+(define (clear!)
+   (set! asks (+ asks 1))
+   (set! want-ask #f)
+   (drop!))
+
+;; The reply does not go with what was typed, or ended before it showed
+;; anything: the request goes, and a new one is made at once when the user
+;; has paused meanwhile. Otherwise the debounce timer, still running, asks.
+(define (miss!)
+   (let ([ask want-ask])
+      (when held
+         (native.hiss-held! #f (string-length typed)))
+      (drop!)
+      (when ask
+         (request! #f))))
 
 ;; Draws each piece of request `id`, minus what was typed through meanwhile.
 ;; A piece is `(back text)`: the text so far, and how many chars before the
@@ -233,7 +265,10 @@
                 (set! request-id #f)
                 (let ([message (or (native.hiss-error)
                                    (and report (or (native.hiss-timing) "hiss: nothing")))])
-                   (when message (adapter.status! message)))]
+                   (when message (adapter.status! message)))
+                ;; Typed ahead of a reply that never caught up.
+                (unless (or ghost-text (equal? typed ""))
+                   (miss!))]
                [(not (request-fits?)) (clear!)]
                [(and (> (car piece) 0) (equal? typed ""))
                 (ghost-show! (- origin (car piece)) (cadr piece) (car piece))
@@ -242,9 +277,19 @@
                 (let ([rest (substring (cadr piece) (string-length typed))])
                    (if (equal? rest "")
                        (ghost-hide!)
-                       (ghost-show! (+ origin (string-length typed)) rest 0)))
+                       (begin
+                          (when held
+                             (native.hiss-held! #t (string-length typed))
+                             (set! held #f)
+                             (set! want-ask #f))
+                          (ghost-show! (+ origin (string-length typed)) rest 0))))
                 (follow! id gen report)]
-               [else (clear!)])))))
+               ;; The reply is shorter than what was typed so far, or the
+               ;; cleaning holds it back: nothing to show yet.
+               [(and (= (car piece) 0) (starts-with? typed (cadr piece)))
+                (ghost-hide!)
+                (follow! id gen report)]
+               [else (miss!)])))))
 
 ;; Asks for a completion at the cursor, replacing any older one. A request
 ;; made with `report` is the user's own; the others are automatic, and
@@ -274,6 +319,7 @@
           [around (context-at index)]
           [hit (native.hiss-cached (car around) (cadr around) (adapter.language) (adapter.path))])
       (when hit
+         (clear!)
          (set! origin index)
          (ghost-show! (- index (car hit)) (cadr hit) (car hit)))
       (if hit #t #f)))
@@ -286,35 +332,61 @@
 ;; Typing waits for the debounce, since more keys are likely to follow. Tab,
 ;; a ghost typed to its end and a fresh insert mode come after a pause the
 ;; user already made, so they ask at once.
+;;
+;; When the wait is over and a held request is still on its way, nothing is
+;; sent: `want-ask` notes the pause, and the reply decides (`miss!`). A ghost
+;; that showed meanwhile is that request's, and stays.
 (define (schedule! wait)
    (when enabled
-      (let* ([gen generation]
+      (set! asks (+ asks 1))
+      (set! want-ask #f)
+      (let* ([ask asks]
              [still? (lambda ()
-                        (and enabled (= gen generation) (adapter.insert-mode?) (adapter.one-cursor?)))])
+                        (and enabled (= ask asks) (adapter.insert-mode?) (adapter.one-cursor?)))])
          (adapter.after! 0
             (lambda ()
                (when (and (still?) (not (show-cached!)))
                   (adapter.after! wait
                      (lambda ()
                         (when (still?)
-                           (request! #f))))))))))
+                           (cond
+                              [ghost-text void]
+                              [request-id (set! want-ask #t)]
+                              [else (request! #f)]))))))))))
 
 ;;; typing
 
 ;; A typed char that matches the ghost's first char shortens the ghost and
-;; keeps the request; anything else clears and asks again. An auto-pair adds
-;; two chars, so it does not count as typing through.
+;; keeps the request. A ghost typed to its end is asked for again at once,
+;; unless its request still streams and may bring more. A char typed while a
+;; request has shown nothing yet is kept beside it (see `held`). Anything
+;; else clears and asks again. An auto-pair adds two chars, so it counts
+;; neither as typing through nor as typing ahead.
 (define (on-char char)
-   (if (and ghost-text
+   (cond
+      [(and ghost-text
             (char=? char (string-ref ghost-text 0))
             (= (adapter.cursor) (+ ghost-index 1))
             (= (adapter.length) (+ ghost-length 1)))
        (let ([rest (substring ghost-text 1)])
           (set! typed (string-append typed (string char)))
-          (if (equal? rest "")
-              (begin (clear!) (schedule! 0))
-              (ghost-show! (adapter.cursor) rest 0)))
-       (begin (clear!) (schedule! debounce-ms))))
+          (cond
+             [(not (equal? rest "")) (ghost-show! (adapter.cursor) rest 0)]
+             [request-id
+              (ghost-hide!)
+              (schedule! 0)]
+             [else
+              (clear!)
+              (schedule! 0)]))]
+      [(and request-id (not ghost-text))
+       (set! typed (string-append typed (string char)))
+       (if (request-fits?)
+           (set! held #t)
+           (clear!))
+       (schedule! debounce-ms)]
+      [else
+       (clear!)
+       (schedule! debounce-ms)]))
 
 ;; Commands that edit text in insert mode ask again; any other command (a
 ;; cursor move, a mode switch) only clears. hiss's own commands are left alone.
