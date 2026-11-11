@@ -183,20 +183,30 @@ pub fn start(
 /// `(hiss-next id)`: a future of `(back text)`, the ghost text so far and how
 /// many chars before the cursor it starts, or of `#f` at the end.
 pub fn next(id: usize) -> FFIValue {
-   let text = requests(|table| table.get(&id).map(|entry| Arc::clone(&entry.text)));
-   let future = async move {
-      let Some(text) = text else {
-         return FFIValue::BoolV(false);
-      };
-      let mut receiver = text.lock().await;
-      match receiver.changed().await {
-         Ok(()) => ghost_value(&receiver.borrow_and_update()),
-         Err(_) => {
-            requests(|table| table.remove(&id));
-            FFIValue::BoolV(false)
+   guarded("hiss-next", || {
+      let text = requests(|table| table.get(&id).map(|entry| Arc::clone(&entry.text)));
+      steel_future(async move {
+         let Some(text) = text else {
+            return FFIValue::BoolV(false);
+         };
+         let mut receiver = text.lock().await;
+         match receiver.changed().await {
+            Ok(()) => ghost_value(&receiver.borrow_and_update()),
+            Err(_) => {
+               requests(|table| table.remove(&id));
+               FFIValue::BoolV(false)
+            }
          }
-      }
-   };
+      })
+   })
+   .unwrap_or_else(|error| {
+      with_last(|last| last.error = Some(error));
+      steel_future(async { FFIValue::BoolV(false) })
+   })
+}
+
+/// A future as Steel takes it, each poll under `catch_unwind`.
+fn steel_future(future: impl Future<Output = FFIValue> + Send + 'static) -> FFIValue {
    let future: FfiFuture<RResult<FFIValue, RBoxError>> = Unwinding(Box::pin(future)).into_ffi();
    future.into()
 }
@@ -247,14 +257,16 @@ pub fn accepted(chars: usize) -> Result<bool, String> {
 /// `"context_before"` and `"context_after"` (chars). Any other name gives
 /// `#f`.
 pub fn config_value(name: String) -> FFIValue {
-   let config = config::config();
    let int = |n: usize| FFIValue::IntV(n as isize);
-   guarded("hiss-config", || match name.as_str() {
-      "enabled" => FFIValue::BoolV(config.enabled),
-      "debounce" => int(config.debounce as usize),
-      "context_before" => int(config.request.prefix_chars),
-      "context_after" => int(config.request.suffix_chars),
-      _ => FFIValue::BoolV(false),
+   guarded("hiss-config", || {
+      let config = config::config();
+      match name.as_str() {
+         "enabled" => FFIValue::BoolV(config.enabled),
+         "debounce" => int(config.debounce as usize),
+         "context_before" => int(config.request.prefix_chars),
+         "context_after" => int(config.request.suffix_chars),
+         _ => FFIValue::BoolV(false),
+      }
    })
    .unwrap_or(FFIValue::BoolV(false))
 }
