@@ -7,6 +7,11 @@
 //! others, since only the newest can still be shown. `hiss-cached` gives a
 //! suggestion already made for the same text, without asking.
 //!
+//! A refusal that every request would meet (no key, a key or model the API
+//! does not take) halts the automatic requests: it is shown once, and
+//! `hiss-start!` asks nothing more until a request the user made, or
+//! `hiss-resume!`.
+//!
 //! Futures handed to Steel are polled on Helix's runtime, so they only wait on
 //! channels, and each poll runs under `catch_unwind`.
 
@@ -14,7 +19,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -23,7 +28,7 @@ use abi_stable::std_types::{RBoxError, RResult};
 use steel::steel_vm::ffi::{FFIValue, FfiFuture, FfiFutureExt};
 use tokio::sync::watch;
 
-use crate::api::{Client, Request, Settings, Timing};
+use crate::api::{Client, Failure, Request, Settings, Timing};
 use crate::cache::{self, Cache, Ghost, Key};
 use crate::{RUNTIME, clean, config, guarded, log};
 
@@ -37,6 +42,16 @@ static CLIENT: LazyLock<Result<Arc<Client>, String>> =
 static REQUESTS: LazyLock<Mutex<HashMap<usize, Entry>>> = LazyLock::new(Default::default);
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(Cache::new(cache::CAPACITY)));
+static HALTED: AtomicBool = AtomicBool::new(false);
+
+/// Keeps `failure` for the status line, and halts the automatic requests
+/// when it would come back with every one of them.
+fn failed(failure: Failure) {
+   if failure.lasting {
+      HALTED.store(true, Ordering::Relaxed);
+   }
+   with_last(|last| last.error = Some(failure.message));
+}
 
 fn cached<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
    f(&mut CACHE.lock().unwrap_or_else(|e| e.into_inner()))
@@ -103,11 +118,11 @@ pub fn warm_up() {
       if let Ok(client) = CLIENT.as_ref() {
          let client = Arc::clone(client);
          RUNTIME.spawn(async move {
-            match client.warm().await {
+            match client.warm(&config::config().request.model).await {
                Ok(took) => log::write(&format!("warm after={}", took.as_millis())),
-               Err(error) => {
-                  log::write(&format!("warm error {}", log::word(&error)));
-                  with_last(|last| last.error = Some(error));
+               Err(failure) => {
+                  log::write(&format!("warm error {}", log::word(&failure.message)));
+                  failed(failure);
                }
             }
          });
@@ -115,19 +130,29 @@ pub fn warm_up() {
    });
 }
 
-/// `(hiss-start! prefix suffix language path)`: the new request's id, or `#f`
-/// when there is no client (see `hiss-error`).
+/// `(hiss-start! prefix suffix language path auto)`: the new request's id,
+/// or `#f` when there is no client (see `hiss-error`) or, for an automatic
+/// request (`auto`), while a lasting refusal halts them.
 pub fn start(
    prefix: String,
    suffix: String,
    language: String,
    path: String,
+   auto: bool,
 ) -> Result<Option<usize>, String> {
    guarded("hiss-start!", || {
+      if auto && HALTED.load(Ordering::Relaxed) {
+         return None;
+      }
+      HALTED.store(false, Ordering::Relaxed);
       let client = match CLIENT.as_ref() {
          Ok(client) => Arc::clone(client),
          Err(error) => {
-            with_last(|last| last.error = Some(error.clone()));
+            failed(Failure {
+               message: error.clone(),
+               transient: false,
+               lasting: true,
+            });
             return None;
          }
       };
@@ -161,10 +186,10 @@ pub fn start(
          if result.is_ok() && !last.1.is_empty() {
             cached(|cache| cache.put(key, last));
          }
-         with_last(|last| match result {
-            Ok(timing) => last.timing = Some(timing.to_string()),
-            Err(error) => last.error = Some(error),
-         });
+         match result {
+            Ok(timing) => with_last(|last| last.timing = Some(timing.to_string())),
+            Err(failure) => failed(failure),
+         }
       });
       let entry = Entry {
          text: Arc::new(tokio::sync::Mutex::new(receiver)),
@@ -244,6 +269,15 @@ pub fn cancel(id: usize) -> Result<bool, String> {
    })
 }
 
+/// `(hiss-resume!)`: lets automatic requests ask again after a lasting
+/// refusal (`:hiss-on`).
+pub fn resume() -> Result<bool, String> {
+   guarded("hiss-resume!", || {
+      HALTED.store(false, Ordering::Relaxed);
+      true
+   })
+}
+
 /// `(hiss-accepted! chars)`: notes in the log that a ghost was taken.
 pub fn accepted(chars: usize) -> Result<bool, String> {
    guarded("hiss-accepted!", || {
@@ -303,7 +337,7 @@ impl Trace {
       }
    }
 
-   fn finish(&mut self, result: &Result<Timing, String>) {
+   fn finish(&mut self, result: &Result<Timing, Failure>) {
       self.done = true;
       let (before, after) = self.context;
       log::write(&match result {
@@ -313,11 +347,11 @@ impl Trace {
             if timing.chars > 0 { "done" } else { "empty" },
             log::timing_fields(timing),
          ),
-         Err(error) => format!(
+         Err(failure) => format!(
             "#{} error after={} ctx={before}+{after} {}",
             self.id,
             self.start.elapsed().as_millis(),
-            log::word(error),
+            log::word(&failure.message),
          ),
       });
    }

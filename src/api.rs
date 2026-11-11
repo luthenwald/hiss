@@ -11,7 +11,8 @@ use crate::clean;
 use crate::sse::{self, Message};
 
 const MESSAGES: &str = "https://api.anthropic.com/v1/messages";
-const MODELS: &str = "https://api.anthropic.com/v1/models?limit=1";
+/// Followed by a model name, it describes that model.
+const MODELS: &str = "https://api.anthropic.com/v1/models/";
 const VERSION: &str = "2023-06-01";
 
 /// The instructions. One sentence on purpose: a fuller prompt, with rules
@@ -158,21 +159,23 @@ impl Client {
    }
 
    /// Opens the connection (TCP, TLS, HTTP/2) with a cheap request, so the
-   /// first completion does not pay for it. Returns how long that took.
-   pub async fn warm(&self) -> Result<Duration, String> {
+   /// first completion does not pay for it, and asks for `model`, which
+   /// checks the key and the model name on the way. Returns how long that
+   /// took.
+   pub async fn warm(&self, model: &str) -> Result<Duration, Failure> {
       let start = Instant::now();
       let response = self
-         .signed(self.http.get(MODELS))
+         .signed(self.http.get(format!("{MODELS}{model}")))
          .send()
          .await
-         .map_err(|e| format!("hiss: {e}"))?;
+         .map_err(Failure::network)?;
       let status = response.status();
-      let _ = response.bytes().await;
-      if status.is_success() {
-         Ok(start.elapsed())
-      } else {
-         Err(format!("hiss: api {}", status.as_u16()))
+      if !status.is_success() {
+         let text = response.text().await.unwrap_or_default();
+         return Err(Failure::refused(status.as_u16(), &text));
       }
+      let _ = response.bytes().await;
+      Ok(start.elapsed())
    }
 
    /// Streams a completion. `on_text` gets the whole cleaned text each time
@@ -180,13 +183,13 @@ impl Client {
    /// reply is only prose, which the cleaning cuts to nothing, it asks again
    /// at once (up to `prose_retries` times), with the model's prose as its
    /// earlier turn and a note that only code is wanted. Returns the timing,
-   /// or an error for the status line.
+   /// or why it failed.
    pub async fn complete(
       &self,
       request: &Request,
       settings: &Settings,
       mut on_text: impl FnMut(&str, usize),
-   ) -> Result<Timing, String> {
+   ) -> Result<Timing, Failure> {
       let mut shape = clean::Shape::new(
          clean::tail_lines(&request.prefix, settings.prefix_chars),
          clean::head_lines(&request.suffix, settings.suffix_chars),
@@ -223,7 +226,7 @@ impl Client {
       start: Instant,
       timing: &mut Timing,
       on_text: &mut impl FnMut(&str, usize),
-   ) -> Result<Reply, String> {
+   ) -> Result<Reply, Failure> {
       let mut tries = 0;
       loop {
          match self.attempt(body, shape, start, timing, on_text).await {
@@ -235,7 +238,7 @@ impl Client {
                timing.error_retries += 1;
                tokio::time::sleep(Duration::from_millis(250 * u64::from(tries))).await;
             }
-            Err(failure) => return Err(failure.message),
+            Err(failure) => return Err(failure),
          }
       }
    }
@@ -262,15 +265,7 @@ impl Client {
       let status = response.status();
       if !status.is_success() {
          let text = response.text().await.unwrap_or_default();
-         let detail = serde_json::from_str::<Value>(&text).map(|v| sse::error_text(&v));
-         let code = status.as_u16();
-         return Err(Failure {
-            message: format!(
-               "hiss: api {code}: {}",
-               detail.unwrap_or_else(|_| "no detail".into())
-            ),
-            transient: code == 429 || code >= 500,
-         });
+         return Err(Failure::refused(status.as_u16(), &text));
       }
 
       let mut parser = sse::Parser::default();
@@ -332,6 +327,7 @@ impl Client {
                      transient: ["overloaded", "rate_limit", "rate limit"]
                         .iter()
                         .any(|kind| text.to_lowercase().contains(kind)),
+                     lasting: false,
                      message: format!("hiss: api error: {text}"),
                   });
                }
@@ -352,12 +348,17 @@ impl Client {
    }
 }
 
-/// Why an attempt failed, and whether asking again may help: yes for a
-/// lost connection, a rate limit or an overloaded server, no for a request
-/// the API refused.
-struct Failure {
-   message: String,
-   transient: bool,
+/// Why a request failed, for the status line, and whether asking again may
+/// help: at once after a lost connection, a rate limit or an overloaded
+/// server (`transient`), and not before the user changes something after a
+/// refusal that every request would meet (`lasting`): a key the API does not
+/// take, a model it does not know or a setting it rejects. The request hiss
+/// sends differs only in its text, so a 400 is a setting too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+   pub message: String,
+   pub transient: bool,
+   pub lasting: bool,
 }
 
 impl Failure {
@@ -365,7 +366,27 @@ impl Failure {
       Failure {
          message: format!("hiss: {error}"),
          transient: !error.is_builder() && !error.is_decode(),
+         lasting: false,
       }
+   }
+
+   /// A response with status `code` and an error `body`.
+   fn refused(code: u16, body: &str) -> Failure {
+      let detail = serde_json::from_str::<Value>(body).map(|v| sse::error_text(&v));
+      Failure {
+         message: format!(
+            "hiss: api {code}: {}",
+            detail.unwrap_or_else(|_| "no detail".into())
+         ),
+         transient: code == 429 || code >= 500,
+         lasting: matches!(code, 400 | 401 | 403 | 404),
+      }
+   }
+}
+
+impl From<Failure> for String {
+   fn from(failure: Failure) -> String {
+      failure.message
    }
 }
 
@@ -493,6 +514,21 @@ mod tests {
          messages.last().unwrap()["content"],
          "<file path=\"src/&quot;main&quot;.rs\" lang=\"rust\" indent=\"3 spaces\">\nfn main() {\n   let x = <CURSOR/>;\n}\n\n</file>"
       );
+   }
+
+   #[test]
+   fn refusals_every_request_meets_last() {
+      let body = r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+      let key = Failure::refused(401, body);
+      assert_eq!(
+         key.message,
+         "hiss: api 401: authentication_error: invalid x-api-key"
+      );
+      assert!(key.lasting && !key.transient);
+      assert!(Failure::refused(404, "").lasting);
+      let busy = Failure::refused(529, "");
+      assert!(busy.transient && !busy.lasting);
+      assert!(!Failure::refused(429, "").lasting);
    }
 
    #[test]

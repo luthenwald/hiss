@@ -153,12 +153,21 @@ fn set(config: &mut Config, key: &str, value: Value) -> Result<(), String> {
       "context_before" => request.prefix_chars = int(&value, 0, 100_000)? as usize,
       "context_after" => request.suffix_chars = int(&value, 0, 100_000)? as usize,
       "model" => match value {
-         Value::Text(model) if !model.trim().is_empty() => request.model = model,
+         Value::Text(model) if is_model_name(&model) => request.model = model,
          _ => return Err("`model` takes a model name in quotes".into()),
       },
       _ => return Err(format!("unknown setting `{key}`")),
    }
    Ok(())
+}
+
+/// A model name as the API writes them (`claude-haiku-5-5`). It goes into
+/// a URL as it is, so nothing else is let through.
+fn is_model_name(name: &str) -> bool {
+   !name.is_empty()
+      && name
+         .chars()
+         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '@'))
 }
 
 #[cfg(test)]
@@ -192,6 +201,11 @@ mod tests {
       assert_eq!(
          problem.as_deref(),
          Some("hiss: config.toml line 1: cannot read the value of `debounce` (and 1 more)")
+      );
+      let (_, problem) = parse("model = \"../v1/files\"");
+      assert_eq!(
+         problem.as_deref(),
+         Some("hiss: config.toml line 1: `model` takes a model name in quotes")
       );
       let (_, problem) = parse("retries = 9");
       assert_eq!(

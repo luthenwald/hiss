@@ -195,7 +195,7 @@ fn main() -> Result<(), String> {
    let client = Client::from_env()?;
 
    RUNTIME.block_on(async {
-      let warm = client.warm().await?;
+      let warm = client.warm(&settings.model).await?;
       println!("warm-up {} ms", warm.as_millis());
       if !options.check {
          return bench(&client, &options, &settings).await;

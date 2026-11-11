@@ -16,7 +16,8 @@
 
 (#%require-dylib "libhiss"
    (prefix-in native. (only-in hiss-version hiss-start! hiss-next hiss-cancel! hiss-cached hiss-error
-                               hiss-timing hiss-accepted! hiss-config hiss-config-problem)))
+                               hiss-timing hiss-accepted! hiss-resume! hiss-config
+                               hiss-config-problem)))
 
 (provide hiss-on
          hiss-off
@@ -198,18 +199,24 @@
                 (follow! id gen report)]
                [else (clear!)])))))
 
-;; Asks for a completion at the cursor, replacing any older one.
+;; Asks for a completion at the cursor, replacing any older one. A request
+;; made with `report` is the user's own; the others are automatic, and
+;; libhiss turns those down without a word while a refusal that would come
+;; back every time (no key, a model the API does not know) stands, having
+;; said it once.
 (define (request! report)
    (clear!)
    (let* ([index (adapter.cursor)]
           [around (context-at index)]
-          [id (native.hiss-start! (car around) (cadr around) (adapter.language) (adapter.path))])
+          [id (native.hiss-start! (car around) (cadr around) (adapter.language) (adapter.path)
+                                  (not report))])
       (if id
           (begin
              (set! request-id id)
              (set! origin index)
              (follow! id generation report))
-          (adapter.status! (or (native.hiss-error) "hiss: no request")))))
+          (let ([message (or (native.hiss-error) (and report "hiss: no request"))])
+             (when message (adapter.status! message))))))
 
 ;; Draws the suggestion libhiss already made for the text around the
 ;; cursor, if there is one, and says whether it did.
@@ -280,9 +287,11 @@
 ;;; commands
 
 ;;@doc
-;; Turn completion on: hiss asks as you type in insert mode.
+;; Turn completion on: hiss asks as you type in insert mode, also after an
+;; error that made it stop asking.
 (define (hiss-on)
    (set! enabled #t)
+   (native.hiss-resume!)
    (adapter.status! "hiss: on")
    void)
 
